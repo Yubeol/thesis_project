@@ -1,13 +1,11 @@
-import json
-
 from agent.translator import (
     get_chat_model,
     get_openai_client,
 )
-from agent.transformer_adapter import (
+
+from agent.draft_generator.transformer_adapter import (
     build_evidence_text,
 )
-
 
 def _parse_json_response(text: str) -> dict:
     """
