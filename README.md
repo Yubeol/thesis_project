@@ -4,7 +4,7 @@
 
 ## 시작하기
 
-1. `.env.example`과 `database/.env.example`을 복사해 로컬 `.env` 파일을 만듭니다.
+1. `.env`과 `database/.env.example`을 복사해 로컬 `.env` 파일을 만듭니다.
 2. 필요한 값을 입력합니다.
 3. `docker compose up -d`로 서비스 구성을 시작합니다.
 
