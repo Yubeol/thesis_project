@@ -3,6 +3,9 @@ import os
 import psycopg
 from dotenv import load_dotenv
 from pgvector.psycopg import register_vector
+from pgvector import Vector
+
+from rag.embedding import embed_query
 
 load_dotenv()
 DEFAULT_TOP_K = 5
