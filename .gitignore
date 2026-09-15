@@ -1,0 +1,47 @@
+# Environment and secrets
+.env
+*.env.local
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+dist/
+build/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Runtime artifacts
+logs/*
+!logs/.gitkeep
+models/*
+!models/.gitkeep
+transformer/checkpoints/*
+!transformer/checkpoints/.gitkeep
+
+# Local data (keep directory placeholders)
+data/raw/papers/*
+!data/raw/papers/.gitkeep
+data/raw/news/*
+!data/raw/news/.gitkeep
+data/processed/papers/*
+!data/processed/papers/.gitkeep
+data/processed/news/*
+!data/processed/news/.gitkeep
+data/training/train/*
+!data/training/train/.gitkeep
+data/training/validation/*
+!data/training/validation/.gitkeep
+data/training/test/*
+!data/training/test/.gitkeep

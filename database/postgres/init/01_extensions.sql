@@ -1,0 +1,1 @@
+-- Add required PostgreSQL extensions here.
