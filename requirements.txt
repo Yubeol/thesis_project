@@ -4,3 +4,5 @@ python-dotenv
 psycopg[binary]
 pgvector
 neo4j
+
+pytest
