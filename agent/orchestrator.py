@@ -1,6 +1,8 @@
-from agent.llm_finalizer import finalize_english_draft
+from agent.finalizer.llm_finalizer import (
+    finalize_english_draft,
+)
 
-from agent.output_limiter import (
+from agent.finalizer.output_limiter import (
     combine_korean_draft,
     count_korean_chars,
     enforce_korean_char_limit,
@@ -11,7 +13,7 @@ from agent.translator import (
     translate_query_to_english,
 )
 
-from agent.transformer_adapter import (
+from agent.draft_generator.transformer_adapter import (
     generate_transformer_draft,
 )
 
@@ -19,7 +21,6 @@ from rag.hybrid import (
     hybrid_retrieve,
     validate_or_abstain,
 )
-
 
 def run_retrieval_pipeline(
     title_ko: str,
