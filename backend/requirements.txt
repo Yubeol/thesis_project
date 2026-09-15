@@ -1,1 +1,5 @@
-# Add backend Python dependencies here.
+fastapi
+uvicorn[standard]
+pydantic
+httpx
+pytest
