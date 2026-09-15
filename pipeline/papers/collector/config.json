@@ -1,0 +1,19 @@
+{
+  "queries": [
+    "K-pop fandom social media",
+    "K-pop global fandom fan activity",
+    "K-pop cultural diffusion globalization",
+    "Korean wave social media international fans",
+    "K-pop TikTok YouTube transnational",
+    "K-pop fan community participation",
+    "K-pop fandom",
+    "Hallyu transnational fandom",
+    "Korean popular music digital culture",
+    "K-pop participatory culture"
+  ],
+  "target": 300,
+  "minimum": 50,
+  "page_size": 100,
+  "pages_per_query": 2,
+  "open_access_only": true
+}

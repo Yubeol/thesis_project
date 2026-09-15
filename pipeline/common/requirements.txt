@@ -1,0 +1,7 @@
+# Dependencies for Suam's collection and preprocessing pipeline.
+pypdf==6.18.1
+trafilatura==2.2.0
+fonttools==4.65.0
+langdetect==1.0.9
+psycopg[binary]==3.3.5
+python-dotenv==1.2.3

@@ -1,0 +1,13 @@
+{
+  "target": 300,
+  "minimum": 200,
+  "lookback_days": 365,
+  "feeds": [
+    {"name": "Soompi", "url": "https://www.soompi.com/feed", "language": "en", "kpop_source": true,
+     "queries": ["world tour", "Billboard", "YouTube", "TikTok", "fandom", "global fans"], "pages": 2,
+     "require_any_category": ["Music", "kpop"]},
+    {"name": "The Korea Herald", "url": "https://www.koreaherald.com/rss/kh_Kpop", "language": "en", "kpop_source": true},
+    {"name": "Yonhap News TV", "url": "https://www.yonhapnewstv.co.kr/category/news/culture/feed/", "language": "ko", "kpop_source": false,
+     "rss_content_is_full": true}
+  ]
+}
