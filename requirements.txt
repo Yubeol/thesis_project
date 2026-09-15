@@ -1,3 +1,6 @@
 # Add shared Python dependencies here.
 openai
 python-dotenv
+psycopg[binary]
+pgvector
+neo4j
