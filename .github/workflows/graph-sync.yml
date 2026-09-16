@@ -4,7 +4,7 @@ on:
   # 수동 실행
   workflow_dispatch:
 
-  # 뉴스 또는 논문 적재가 성공하면 자동 실행
+  # 뉴스 / 논문 적재가 성공하면 자동 실행
   workflow_run:
     workflows:
       - Ingest news
@@ -23,13 +23,13 @@ jobs:
   sync:
     name: Sync PostgreSQL data to Neo4j
 
-    # 수동 실행이거나,
+    # 수동 실행이거나
     # Ingest news / Ingest papers가 성공했을 때만 실행
     if: >
       github.event_name == 'workflow_dispatch' ||
       github.event.workflow_run.conclusion == 'success'
 
-    # PostgreSQL / Neo4j가 설치된 EC2에서 직접 실행
+    # EC2 self-hosted runner 사용
     runs-on:
       - self-hosted
       - ec2-db
@@ -37,25 +37,26 @@ jobs:
     timeout-minutes: 30
 
     env:
-      # -------------------------------------------------
+      # =================================================
       # PostgreSQL
-      # 같은 EC2 안에 있으므로 공인 IP를 사용하지 않는다.
-      # -------------------------------------------------
+      # 같은 EC2 안에 있으므로 localhost 사용
+      # =================================================
       POSTGRES_HOST: 127.0.0.1
       POSTGRES_PORT: ${{ secrets.POSTGRES_PORT }}
       POSTGRES_DB: ${{ secrets.POSTGRES_DB }}
       POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
       POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
 
-      # -------------------------------------------------
+      # =================================================
       # Neo4j
-      # 같은 EC2 안의 Bolt 포트에 직접 접속
-      # -------------------------------------------------
+      # 같은 EC2 안의 Bolt 포트 사용
+      # =================================================
       NEO4J_URI: bolt://127.0.0.1:7687
       NEO4J_USER: ${{ secrets.NEO4J_USER }}
       NEO4J_PASSWORD: ${{ secrets.NEO4J_PASSWORD }}
 
     steps:
+
       # -------------------------------------------------
       # 1. Repository checkout
       # -------------------------------------------------
@@ -76,16 +77,20 @@ jobs:
 
       # -------------------------------------------------
       # 3. Install dependencies
+      #
+      # 중요:
+      # synchronizer가 pgvector.psycopg를 import하므로
+      # pgvector 패키지도 반드시 설치한다.
       # -------------------------------------------------
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r pipeline/common/requirements.txt
-          python -m pip install "neo4j>=5,<6"
+          python -m pip install "neo4j>=5,<6" pgvector
 
 
       # -------------------------------------------------
-      # 4. Check required environment variables
+      # 4. Validate required configuration
       #
       # Secret 값 자체는 출력하지 않는다.
       # -------------------------------------------------
@@ -130,6 +135,7 @@ jobs:
           import socket
 
           host = "127.0.0.1"
+
           port = int(
               os.environ.get(
                   "POSTGRES_PORT",
@@ -137,28 +143,29 @@ jobs:
               ).strip()
           )
 
-          print("Testing PostgreSQL...")
-          print(f"Host: {host}")
-          print(f"Port: {port}")
+          print("Testing PostgreSQL connectivity...")
+          print(f"Target host: {host}")
+          print(f"Target port: {port}")
 
           try:
               with socket.create_connection(
                   (host, port),
                   timeout=10,
               ):
-                  print(
-                      "POSTGRES_TCP_CHECK=SUCCESS"
-                  )
+                  print("POSTGRES_TCP_CHECK=SUCCESS")
 
           except TimeoutError:
-              print(
-                  "POSTGRES_TCP_CHECK=TIMEOUT"
-              )
+              print("POSTGRES_TCP_CHECK=TIMEOUT")
               raise SystemExit(1)
 
           except ConnectionRefusedError:
+              print("POSTGRES_TCP_CHECK=REFUSED")
+              raise SystemExit(1)
+
+          except socket.gaierror:
               print(
-                  "POSTGRES_TCP_CHECK=REFUSED"
+                  "POSTGRES_TCP_CHECK="
+                  "HOSTNAME_RESOLUTION_FAILED"
               )
               raise SystemExit(1)
 
@@ -172,7 +179,7 @@ jobs:
 
 
       # -------------------------------------------------
-      # 6. Test Neo4j Bolt TCP connection
+      # 6. Test Neo4j Bolt connection
       # -------------------------------------------------
       - name: Test Neo4j connectivity
         run: |
@@ -182,28 +189,29 @@ jobs:
           host = "127.0.0.1"
           port = 7687
 
-          print("Testing Neo4j Bolt...")
-          print(f"Host: {host}")
-          print(f"Port: {port}")
+          print("Testing Neo4j Bolt connectivity...")
+          print(f"Target host: {host}")
+          print(f"Target port: {port}")
 
           try:
               with socket.create_connection(
                   (host, port),
                   timeout=10,
               ):
-                  print(
-                      "NEO4J_TCP_CHECK=SUCCESS"
-                  )
+                  print("NEO4J_TCP_CHECK=SUCCESS")
 
           except TimeoutError:
-              print(
-                  "NEO4J_TCP_CHECK=TIMEOUT"
-              )
+              print("NEO4J_TCP_CHECK=TIMEOUT")
               raise SystemExit(1)
 
           except ConnectionRefusedError:
+              print("NEO4J_TCP_CHECK=REFUSED")
+              raise SystemExit(1)
+
+          except socket.gaierror:
               print(
-                  "NEO4J_TCP_CHECK=REFUSED"
+                  "NEO4J_TCP_CHECK="
+                  "HOSTNAME_RESOLUTION_FAILED"
               )
               raise SystemExit(1)
 
@@ -224,19 +232,29 @@ jobs:
           python - <<'PY'
           import psycopg
           import neo4j
+          import pgvector
+
+          from pgvector.psycopg import register_vector
 
           print("PSYCOPG_IMPORT=SUCCESS")
           print("NEO4J_DRIVER_IMPORT=SUCCESS")
+          print("PGVECTOR_IMPORT=SUCCESS")
           PY
 
 
       # -------------------------------------------------
       # 8. Run Graph Sync
       #
-      # PostgreSQL의 Paper / News 데이터를 읽어서
-      # Neo4j로 동기화한다.
+      # PostgreSQL
+      #   Paper / News
       #
-      # Entity는 entity_id 기준으로 MERGE한다.
+      #        ↓
+      #
+      # Neo4j
+      #   Paper / News / Entity
+      #
+      # Entity는 기존 synchronizer 로직에 따라
+      # entity_id 기준으로 연결한다.
       # -------------------------------------------------
       - name: Synchronize graph
         run: |
