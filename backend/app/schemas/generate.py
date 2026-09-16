@@ -1,4 +1,10 @@
-from pydantic import BaseModel, Field
+from typing import Literal
+
+from pydantic import (
+    BaseModel,
+    Field,
+    field_validator,
+)
 
 
 class GenerateRequest(BaseModel):
@@ -13,6 +19,31 @@ class GenerateRequest(BaseModel):
         description="한국어 논문 주제 또는 추가 설명",
     )
 
+    @field_validator("title_ko")
+    @classmethod
+    def validate_title(cls, value: str) -> str:
+        value = value.strip()
+
+        if not value:
+            raise ValueError(
+                "논문 제목을 입력해주세요."
+            )
+
+        return value
+
+    @field_validator("topic_ko")
+    @classmethod
+    def validate_topic(
+        cls,
+        value: str | None,
+    ) -> str | None:
+        if value is None:
+            return None
+
+        value = value.strip()
+
+        return value or None
+
 
 class DraftResponse(BaseModel):
     title: str
@@ -22,10 +53,11 @@ class DraftResponse(BaseModel):
 
 
 class GenerateResponse(BaseModel):
-    status: str
+    status: Literal[
+        "completed",
+        "abstained",
+    ]
 
     draft: DraftResponse | None = None
-
     character_count: int = 0
-
     message: str | None = None

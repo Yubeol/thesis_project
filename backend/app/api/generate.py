@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import (
     APIRouter,
     HTTPException,
@@ -13,6 +15,9 @@ from backend.app.services.paper_agent_service import (
 )
 
 
+logger = logging.getLogger(__name__)
+
+
 router = APIRouter(
     prefix="/api",
     tags=["paper-generation"],
@@ -26,11 +31,6 @@ router = APIRouter(
 def generate_paper_endpoint(
     request: GenerateRequest,
 ):
-    """
-    논문 제목/주제를 입력받아
-    최종 논문 초안을 생성한다.
-    """
-
     try:
         return generate_paper(
             title_ko=request.title_ko,
@@ -44,10 +44,14 @@ def generate_paper_endpoint(
         ) from exc
 
     except Exception as exc:
+        logger.exception(
+            "논문 생성 중 오류 발생"
+        )
+
         raise HTTPException(
             status_code=500,
             detail=(
-                "논문 생성 중 오류가 발생했습니다: "
-                f"{exc}"
+                "논문 생성 중 내부 오류가 "
+                "발생했습니다."
             ),
         ) from exc
