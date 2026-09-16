@@ -159,6 +159,26 @@ jobs:
           ls -lh \
             data/processed/papers/papers_ready_resolved.json
 
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          root = Path("data/processed/papers")
+          required = ("papers.json", "papers_ready.json", "papers_ready_resolved.json", "processing_report.json")
+          if any(not (root / name).is_file() for name in required):
+              raise SystemExit("PAPER_OUTPUT_CHECK=MISSING_FILE")
+
+          ready = json.loads((root / "papers_ready.json").read_text(encoding="utf-8"))
+          resolved = json.loads((root / "papers_ready_resolved.json").read_text(encoding="utf-8"))
+          report = json.loads((root / "processing_report.json").read_text(encoding="utf-8"))
+          if (not isinstance(ready, list) or not ready or not isinstance(resolved, list)
+                  or not report.get("minimum_met") or len(ready) != report.get("ready")
+                  or [paper.get("id") for paper in ready] != [paper.get("id") for paper in resolved]
+                  or any(paper.get("quality_state") != "ready" for paper in resolved)):
+              raise SystemExit("PAPER_OUTPUT_CHECK=INVALID_READY_SET")
+          print(f"PAPER_OUTPUT_CHECK=SUCCESS ready={len(ready)}")
+          PY
+
 
       # -------------------------------------------------
       # 10. Upload data for the EC2 PostgreSQL job
@@ -320,10 +340,13 @@ jobs:
               for key, value in values.items()
           )
 
-          env_path.write_text(
-              text + "\n",
-              encoding="utf-8",
+          descriptor = os.open(
+              env_path,
+              os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+              0o600,
           )
+          with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+              stream.write(text + "\n")
 
           print("PostgreSQL runtime environment created.")
           print("POSTGRES_HOST=127.0.0.1")
@@ -348,16 +371,16 @@ jobs:
 
           host = os.environ["POSTGRES_HOST"].strip()
 
-          port = int(
-              os.environ.get(
-                  "POSTGRES_PORT",
-                  "5432",
-              ).strip()
-          )
-
           print("Testing local PostgreSQL TCP connectivity...")
           print(f"Target host: {host}")
-          print(f"Target port: {port}")
+
+          try:
+              port = int(os.environ["POSTGRES_PORT"].strip())
+              if not 1 <= port <= 65535:
+                  raise ValueError()
+          except (KeyError, ValueError):
+              print("POSTGRES_TCP_CHECK=INVALID_PORT")
+              raise SystemExit(1)
 
           try:
               with socket.create_connection(
