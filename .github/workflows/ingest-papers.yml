@@ -10,10 +10,10 @@ on:
         default: 300
 
       minimum:
-        description: Minimum English papers required after processing
+        description: Minimum ready English papers required for incremental ingestion
         required: false
         type: number
-        default: 50
+        default: 1
 
   schedule:
     # UTC 16:30 = KST next day 01:30
@@ -31,13 +31,13 @@ jobs:
   # ==========================================================
   # JOB 0
   #
-  # EC2 Self-hosted Runner
+  # EC2 self-hosted runner
   #
   # PostgreSQL
   #   ↓
-  # 기존 papers 식별정보 snapshot
+  # existing_papers.json
   #   ↓
-  # Artifact
+  # GitHub Artifact
   # ==========================================================
 
   snapshot-existing-papers:
@@ -89,7 +89,7 @@ jobs:
 
 
       # ------------------------------------------------------
-      # 4. PostgreSQL config
+      # 4. PostgreSQL configuration
       # ------------------------------------------------------
 
       - name: Validate PostgreSQL configuration
@@ -117,14 +117,12 @@ jobs:
                   + ", ".join(missing)
               )
 
-          print(
-              "POSTGRES_CONFIGURATION=SUCCESS"
-          )
+          print("POSTGRES_CONFIGURATION=SUCCESS")
           PY
 
 
       # ------------------------------------------------------
-      # 5. TCP connectivity
+      # 5. PostgreSQL connectivity
       # ------------------------------------------------------
 
       - name: Test PostgreSQL connectivity
@@ -144,10 +142,7 @@ jobs:
 
           try:
               with socket.create_connection(
-                  (
-                      host,
-                      port,
-                  ),
+                  (host, port),
                   timeout=10,
               ):
                   print(
@@ -158,14 +153,12 @@ jobs:
               print(
                   "POSTGRES_TCP_CHECK=TIMEOUT"
               )
-
               raise SystemExit(1)
 
           except ConnectionRefusedError:
               print(
                   "POSTGRES_TCP_CHECK=REFUSED"
               )
-
               raise SystemExit(1)
 
           except OSError as exc:
@@ -173,22 +166,18 @@ jobs:
                   "POSTGRES_TCP_CHECK=FAILED:"
                   + type(exc).__name__
               )
-
               raise SystemExit(1)
           PY
 
 
       # ------------------------------------------------------
-      # 6. Existing paper snapshot
+      # 6. Export existing papers
       #
-      # title은 추적/검사용으로 포함한다.
+      # 현재 PostgreSQL에 저장된 논문의
+      # DOI / source_url을 snapshot으로 만든다.
       #
-      # 실제 OpenAlex 사전 중복 판정은:
-      # - DOI
-      # - source_url
-      # - OpenAlex W ID
-      #
-      # 최종 DB loader는 기존 content_hash 검사도 수행한다.
+      # OpenAlex 수집 단계에서 이 목록을 이용해
+      # 이미 DB에 있는 논문은 미리 제외한다.
       # ------------------------------------------------------
 
       - name: Export existing paper identities
@@ -226,9 +215,7 @@ jobs:
                       """
                   )
 
-                  rows = (
-                      cursor.fetchall()
-                  )
+                  rows = cursor.fetchall()
 
           payload = {
               "schema_version": 1,
@@ -288,12 +275,11 @@ jobs:
 
 
       # ------------------------------------------------------
-      # 7. Upload snapshot
+      # 7. Upload snapshot artifact
       # ------------------------------------------------------
 
       - name: Upload existing paper snapshot
         uses: actions/upload-artifact@v4
-
         with:
           name: paper-existing-snapshot-${{ github.run_id }}-${{ github.run_attempt }}
 
@@ -310,15 +296,13 @@ jobs:
   #
   # GitHub Hosted Runner
   #
-  # DB Snapshot
-  #   ↓
-  # OpenAlex
-  #   ↓
-  # 신규 후보만 선택
-  #   ↓
+  # existing_papers.json
+  #       ↓
+  # OpenAlex 신규 논문
+  #       ↓
   # PDF / HTML
-  #   ↓
-  # 전처리
+  #       ↓
+  # Extract / Clean / Quality
   # ==========================================================
 
   collect:
@@ -349,7 +333,6 @@ jobs:
 
       - name: Setup Python
         uses: actions/setup-python@v5
-
         with:
           python-version: '3.12'
 
@@ -377,12 +360,11 @@ jobs:
 
 
       # ------------------------------------------------------
-      # 12. Download DB snapshot
+      # 12. Download PostgreSQL snapshot
       # ------------------------------------------------------
 
       - name: Download existing paper snapshot
         uses: actions/download-artifact@v4
-
         with:
           name: paper-existing-snapshot-${{ github.run_id }}-${{ github.run_attempt }}
 
@@ -444,15 +426,14 @@ jobs:
       # ------------------------------------------------------
       # 14. OpenAlex
       #
-      # target=300은 이제
-      # "DB에 없는 신규 후보 300개"라는 의미.
+      # target = 신규 후보 목표 수
       #
-      # 각 query 최대 20페이지까지 탐색하지만
-      # 신규 unique 후보 300개를 채우면 즉시 종료한다.
+      # DB에 이미 있는 DOI/source_url은 제외하고
+      # 신규 후보가 target에 도달할 때까지
+      # cursor pagination을 진행한다.
       # ------------------------------------------------------
 
       - name: Collect new OpenAlex paper metadata
-
         env:
           OPENALEX_API_KEY: ${{ secrets.OPENALEX_API_KEY }}
 
@@ -473,7 +454,7 @@ jobs:
 
 
       # ------------------------------------------------------
-      # 15. Collection statistics
+      # 15. OpenAlex statistics
       # ------------------------------------------------------
 
       - name: Show OpenAlex collection statistics
@@ -532,10 +513,10 @@ jobs:
 
 
       # ------------------------------------------------------
-      # 16. OA documents
+      # 16. Download OA source
       #
-      # download.py 내부에서 개별 실패는
-      # retry → unavailable → 다음 논문 계속.
+      # 개별 논문 다운로드 실패는
+      # download.py 내부에서 unavailable 처리한다.
       # ------------------------------------------------------
 
       - name: Acquire accessible OA source documents
@@ -563,7 +544,7 @@ jobs:
 
 
       # ------------------------------------------------------
-      # 18. Acquisition stats
+      # 18. Acquisition statistics
       # ------------------------------------------------------
 
       - name: Show paper acquisition statistics
@@ -599,7 +580,15 @@ jobs:
 
 
       # ------------------------------------------------------
-      # 19. Extract / clean / quality
+      # 19. Extract / Clean / Quality
+      #
+      # 증분 수집이므로:
+      #
+      # READY 1편 이상
+      # → 성공
+      #
+      # 품질 기준 자체를 낮추는 것이 아니다.
+      # 품질 검사를 통과한 논문만 다음 단계로 넘긴다.
       # ------------------------------------------------------
 
       - name: Extract and assess paper sections
@@ -607,10 +596,10 @@ jobs:
           MINIMUM="${{ github.event.inputs.minimum }}"
 
           if [ -z "$MINIMUM" ]; then
-            MINIMUM=50
+            MINIMUM=1
           fi
 
-          echo "MINIMUM_ENGLISH_PAPERS=$MINIMUM"
+          echo "MINIMUM_READY_ENGLISH_PAPERS=$MINIMUM"
 
           python -m pipeline.papers.extractor.process \
             --minimum-english "$MINIMUM"
@@ -648,7 +637,7 @@ jobs:
 
 
       # ------------------------------------------------------
-      # 22. Validate processing output
+      # 22. Validate processed output
       # ------------------------------------------------------
 
       - name: Validate paper processing output
@@ -686,16 +675,30 @@ jobs:
                   )
               )
           )
+
+          ready = (
+              root
+              / "papers_ready.json"
+          )
+
+          if not ready.is_file():
+              raise SystemExit(
+                  "papers_ready.json "
+                  "was not created"
+              )
+
+          print(
+              "PAPERS_READY_JSON=SUCCESS"
+          )
           PY
 
 
       # ------------------------------------------------------
-      # 23. Transfer to EC2
+      # 23. Transfer artifact to EC2
       # ------------------------------------------------------
 
       - name: Upload papers for PostgreSQL load
         uses: actions/upload-artifact@v4
-
         with:
           name: papers-db-transfer-${{ github.run_id }}-${{ github.run_attempt }}
 
@@ -712,10 +715,10 @@ jobs:
   # ==========================================================
   # JOB 2
   #
-  # EC2 Self-hosted Runner
+  # EC2 self-hosted runner
   #
   # Processed papers
-  #   ↓
+  #       ↓
   # PostgreSQL
   # ==========================================================
 
@@ -746,7 +749,6 @@ jobs:
 
       - name: Checkout repository
         uses: actions/checkout@v4
-
         with:
           ref: main
 
@@ -757,7 +759,6 @@ jobs:
 
       - name: Setup Python
         uses: actions/setup-python@v5
-
         with:
           python-version: '3.12'
 
@@ -773,12 +774,11 @@ jobs:
 
 
       # ------------------------------------------------------
-      # 27. Download processed papers
+      # 27. Download artifact
       # ------------------------------------------------------
 
       - name: Download processed paper artifact
         uses: actions/download-artifact@v4
-
         with:
           name: papers-db-transfer-${{ github.run_id }}-${{ github.run_attempt }}
 
@@ -786,7 +786,7 @@ jobs:
 
 
       # ------------------------------------------------------
-      # 28. Verify transfer
+      # 28. Verify transferred data
       # ------------------------------------------------------
 
       - name: Verify transferred paper data
@@ -801,6 +801,14 @@ jobs:
 
           fi
 
+          if [ ! -f "data/processed/papers/papers_ready.json" ]; then
+
+            echo "papers_ready.json was not transferred."
+
+            exit 1
+
+          fi
+
           find data/processed/papers \
             -maxdepth 5 \
             -type f \
@@ -809,7 +817,7 @@ jobs:
 
 
       # ------------------------------------------------------
-      # 29. PostgreSQL config
+      # 29. PostgreSQL configuration
       # ------------------------------------------------------
 
       - name: Validate PostgreSQL configuration
@@ -848,7 +856,7 @@ jobs:
 
 
       # ------------------------------------------------------
-      # 30. PostgreSQL TCP
+      # 30. PostgreSQL connectivity
       # ------------------------------------------------------
 
       - name: Test PostgreSQL connectivity
@@ -868,10 +876,7 @@ jobs:
 
           try:
               with socket.create_connection(
-                  (
-                      host,
-                      port,
-                  ),
+                  (host, port),
                   timeout=10,
               ):
                   print(
@@ -882,14 +887,12 @@ jobs:
               print(
                   "POSTGRES_TCP_CHECK=TIMEOUT"
               )
-
               raise SystemExit(1)
 
           except ConnectionRefusedError:
               print(
                   "POSTGRES_TCP_CHECK=REFUSED"
               )
-
               raise SystemExit(1)
 
           except socket.gaierror:
@@ -897,7 +900,6 @@ jobs:
                   "POSTGRES_TCP_CHECK="
                   "HOSTNAME_RESOLUTION_FAILED"
               )
-
               raise SystemExit(1)
 
           except OSError as exc:
@@ -905,15 +907,14 @@ jobs:
                   "POSTGRES_TCP_CHECK=FAILED:"
                   + type(exc).__name__
               )
-
               raise SystemExit(1)
           PY
 
 
       # ------------------------------------------------------
-      # 31. Load papers
+      # 31. Load PostgreSQL
       #
-      # 여기서 기존 loader가 다시:
+      # loader가 최종적으로 다시
       # DOI / source_url / content_hash
       # 중복 검사를 수행한다.
       # ------------------------------------------------------
@@ -931,7 +932,6 @@ jobs:
 
       - name: Show PostgreSQL paper load report
         if: always()
-
         run: |
           if [ -f "data/processed/papers/load_report.json" ]; then
 
@@ -946,14 +946,12 @@ jobs:
 
 
       # ------------------------------------------------------
-      # 33. Final artifact
+      # 33. Preserve artifacts
       # ------------------------------------------------------
 
       - name: Preserve paper ingestion artifacts
         if: always()
-
         uses: actions/upload-artifact@v4
-
         with:
           name: papers-${{ github.run_id }}-${{ github.run_attempt }}
 
