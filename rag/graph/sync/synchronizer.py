@@ -1,8 +1,33 @@
+"""Keep the existing paper graph and attach resolved mentions from both sources."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+
+from pipeline.common.entity_resolver import EntityResolver, resolve_record
 from rag.graph.builder.paper_graph_builder import (
     build_paper_graph,
     ensure_graph_constraints,
 )
 from rag.vector.retriever import get_connection
+from rag.graph.sync.entity_sync import (
+    ensure_entity_constraints,
+    merge_entity_mentions,
+    merge_news_node,
+)
+
+
+LOG = logging.getLogger(__name__)
+
+
+def _resolver_or_empty() -> EntityResolver:
+    try:
+        return EntityResolver.from_file()
+    except (OSError, ValueError, TypeError) as exc:
+        LOG.warning("ENTITY_UNRESOLVED catalogue_error=%s", type(exc).__name__)
+        return EntityResolver([])
 
 
 def _normalize_authors(
@@ -10,6 +35,14 @@ def _normalize_authors(
 ) -> list[str]:
     if not authors:
         return []
+
+    if authors.startswith("["):
+        try:
+            values = json.loads(authors)
+            if isinstance(values, list) and all(isinstance(value, str) for value in values):
+                return [value.strip() for value in values if value.strip()]
+        except json.JSONDecodeError:
+            pass
 
     authors = authors.strip()
 
@@ -57,6 +90,8 @@ def _normalize_keywords(
 
 def fetch_unsynced_papers(
     limit: int | None = None,
+    *,
+    reconcile: bool = False,
 ) -> list[dict]:
 
     sql = """
@@ -68,16 +103,20 @@ def fetch_unsynced_papers(
             abstract,
             keywords,
             source
+            , introduction
+            , body
+            , conclusion
+            , language
         FROM papers
-        WHERE graph_synced = FALSE
+        WHERE (%s OR graph_synced = FALSE)
         ORDER BY paper_id
     """
 
-    params = ()
+    params = (reconcile,)
 
     if limit is not None:
         sql += " LIMIT %s"
-        params = (limit,)
+        params = (reconcile, limit)
 
     with get_connection() as conn:
         with conn.cursor() as cur:
@@ -97,6 +136,10 @@ def fetch_unsynced_papers(
                 if row[6]
                 else None
             ),
+            "introduction": row[7],
+            "body": row[8],
+            "conclusion": row[9],
+            "language": row[10],
         }
         for row in rows
     ]
@@ -122,12 +165,16 @@ def mark_paper_synced(
 
 def sync_papers_to_graph(
     limit: int | None = None,
+    *,
+    reconcile: bool = False,
 ) -> dict:
 
     ensure_graph_constraints()
+    ensure_entity_constraints()
+    resolver = _resolver_or_empty()
 
     papers = fetch_unsynced_papers(
-        limit=limit
+        limit=limit, reconcile=reconcile
     )
 
     synced = 0
@@ -136,6 +183,14 @@ def sync_papers_to_graph(
     for paper in papers:
         try:
             build_paper_graph(paper)
+
+            resolved = resolve_record({
+                "title": paper["title"],
+                "fulltext": "\n".join(paper.get(part) or "" for part in
+                                     ("abstract", "introduction", "body", "conclusion")),
+                "language": paper.get("language"),
+            }, "papers", resolver)
+            merge_entity_mentions("Paper", paper["paper_id"], resolved["entities"])
 
             mark_paper_synced(
                 paper["paper_id"]
@@ -147,7 +202,7 @@ def sync_papers_to_graph(
             failed.append(
                 {
                     "paper_id": paper["paper_id"],
-                    "error": str(exc),
+                    "error_type": type(exc).__name__,
                 }
             )
 
@@ -156,3 +211,61 @@ def sync_papers_to_graph(
         "synced": synced,
         "failed": failed,
     }
+
+
+def fetch_news_for_graph(limit: int | None = None) -> list[dict]:
+    query = """
+        SELECT news_id, original_language, title_original, content_original,
+               published_at, source, url
+        FROM news ORDER BY news_id
+    """
+    params = ()
+    if limit is not None:
+        query += " LIMIT %s"
+        params = (limit,)
+    with get_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+    return [dict(zip(("news_id", "original_language", "title_original",
+                      "content_original", "published_at", "source", "url"), row))
+            for row in rows]
+
+
+def sync_news_to_graph(limit: int | None = None) -> dict:
+    ensure_entity_constraints()
+    resolver = _resolver_or_empty()
+    news = fetch_news_for_graph(limit)
+    synced, mentions, failed = 0, 0, []
+    for record in news:
+        try:
+            merge_news_node(record)
+            resolved = resolve_record(record, "news", resolver)
+            mentions += merge_entity_mentions("News", record["news_id"], resolved["entities"])
+            synced += 1
+        except Exception as exc:
+            LOG.warning("News graph sync failed news_id=%s error=%s", record["news_id"], type(exc).__name__)
+            failed.append({"news_id": record["news_id"], "error_type": type(exc).__name__})
+    return {"requested": len(news), "synced": synced, "mentions": mentions, "failed": failed}
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--source", choices=["papers", "news", "both"], default="both")
+    parser.add_argument("--limit", type=int)
+    parser.add_argument("--reconcile-papers", action="store_true",
+                        help="Recheck already synced papers after catalogue updates")
+    args = parser.parse_args()
+    if args.limit is not None and args.limit < 1:
+        parser.error("--limit must be positive")
+    reports = {}
+    if args.source in {"papers", "both"}:
+        reports["papers"] = sync_papers_to_graph(args.limit, reconcile=args.reconcile_papers)
+    if args.source in {"news", "both"}:
+        reports["news"] = sync_news_to_graph(args.limit)
+    print(json.dumps(reports, ensure_ascii=False))
+    return 0 if all(not report["failed"] for report in reports.values()) else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

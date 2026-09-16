@@ -2,6 +2,7 @@ from rag.graph.graph_rag.retriever import (
     get_database_name,
     get_neo4j_driver,
 )
+from neo4j.exceptions import ClientError
 
 
 def ensure_graph_constraints() -> None:
@@ -41,10 +42,18 @@ def ensure_graph_constraints() -> None:
     ]
 
     for query in queries:
-        driver.execute_query(
-            query,
-            database_=database,
-        )
+        try:
+            driver.execute_query(
+                query,
+                database_=database,
+            )
+        except ClientError as exc:
+            # The deployed database already has non-unique name indexes for
+            # Author, Keyword and Source. Neo4j cannot add a uniqueness
+            # constraint over the same property without dropping that index.
+            # Keep the existing graph schema and continue Paper sync.
+            if exc.code != "Neo.ClientError.Schema.IndexAlreadyExists" or "paper_id_unique" in query:
+                raise
 
 
 def build_paper_graph(

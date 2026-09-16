@@ -1,7 +1,60 @@
 name: Graph sync
-on: workflow_dispatch
+
+on:
+  workflow_dispatch:
+    inputs:
+      reconcile_papers:
+        description: Recheck papers already marked graph_synced after alias catalogue changes
+        type: boolean
+        default: false
+  workflow_run:
+    workflows:
+      - Ingest news
+      - Ingest papers
+    types:
+      - completed
+
+permissions:
+  contents: read
+
+concurrency:
+  group: graph-sync
+  cancel-in-progress: false
+
 jobs:
-  placeholder:
-    runs-on: ubuntu-latest
+  sync:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    # Set DB_RUNNER_LABELS_JSON to ["self-hosted","linux","x64","ec2-db"]
+    # when the EC2 DB runner is registered. Until then this preserves the
+    # repository's current hosted-runner behaviour.
+    runs-on: ${{ fromJSON(vars.DB_RUNNER_LABELS_JSON || '["ubuntu-latest"]') }}
+    timeout-minutes: 60
     steps:
-      - run: echo "Configure graph synchronization"
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install graph sync dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Test entity resolution
+        run: python -m unittest discover -s tests/pipeline -p 'test_entity_resolution.py' -v
+
+      - name: Sync verified mentions from PostgreSQL to Neo4j
+        env:
+          POSTGRES_HOST: ${{ secrets.POSTGRES_HOST }}
+          POSTGRES_PORT: ${{ secrets.POSTGRES_PORT }}
+          POSTGRES_DB: ${{ secrets.POSTGRES_DB }}
+          POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          NEO4J_URI: ${{ secrets.NEO4J_URI }}
+          NEO4J_USER: ${{ secrets.NEO4J_USER }}
+          NEO4J_PASSWORD: ${{ secrets.NEO4J_PASSWORD }}
+        run: |
+          if [[ '${{ inputs.reconcile_papers }}' == 'true' ]]; then
+            python -m rag.graph.sync.synchronizer --source both --reconcile-papers
+          else
+            python -m rag.graph.sync.synchronizer --source both
+          fi

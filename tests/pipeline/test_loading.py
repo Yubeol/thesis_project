@@ -45,6 +45,23 @@ class LoadingTests(unittest.TestCase):
         with self.assertRaisesRegex(LoadValidationError, "review"):
             prepare_record("papers", {"title": "Example", "source_url": "https://example.org", "quality_flags": ["source_title_mismatch"]})
 
+    def test_only_ready_processed_papers_can_be_loaded(self):
+        base = {"id": "W1", "title": "Example", "source_url": "https://example.org/paper",
+                "quality_flags": []}
+        for state in ("review_required", "rejected"):
+            with self.assertRaisesRegex(LoadValidationError, "not ready"):
+                prepare_record("papers", {**base, "quality_state": state})
+        self.assertEqual(prepare_record("papers", {**base, "quality_state": "ready"})["title"], "Example")
+
+    def test_paper_identity_survives_reprocessing(self):
+        base = {"id": "W1", "title": "Example", "source_url": "https://example.org/paper",
+                "doi": "https://doi.org/10.1234/EXAMPLE", "quality_state": "ready"}
+        first = prepare_record("papers", {**base, "fulltext": "Earlier extracted wording"})
+        second = prepare_record("papers", {**base, "fulltext": "Improved extracted wording"})
+        self.assertNotEqual(first["content_hash"], second["content_hash"])
+        self.assertEqual(first["doi"], second["doi"])
+        self.assertEqual(first["source_url"], second["source_url"])
+
     def test_schema_change_stops_loader(self):
         fields = {name: {"type": kind, "not_null": False, "default": None} for name, kind in TABLES["papers"]["types"].items()}
         fields["paper_id"] = {"type": "bigint", "not_null": True, "default": "nextval('example')"}

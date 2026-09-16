@@ -1,8 +1,15 @@
 import unittest
+import hashlib
+import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from pipeline.papers.cleaner.text import clean_pages
 from pipeline.papers.extractor.sections import heading_kind, split_sections
-from pipeline.papers.extractor.process import quality_flags
+from pipeline.papers.extractor.process import (
+    EncryptedPDFError, minimum_exit_code, process_one, process_records, quality_flags,
+)
 
 
 class SectionTests(unittest.TestCase):
@@ -85,6 +92,123 @@ class SectionTests(unittest.TestCase):
         text = clean_pages(pages)
         self.assertNotIn("ARTICLE TITLE", text)
         self.assertNotIn("Journal", text)
+
+    def test_canonical_headings_and_uncertain_heading(self):
+        names = {
+            "Related Work": "literature_review", "Previous Studies": "literature_review",
+            "Background and Related Work": "literature_review", "Experimental Results": "results",
+            "Discussion and Implications": "discussion", "Conclusion and Future Work": "conclusion",
+            "Supplementary Material": "appendix", "Literature Cited": "references",
+            "3. Methods": "methodology", "4. Unknown Topic": "other",
+        }
+        for heading, expected in names.items():
+            self.assertEqual(heading_kind(heading), expected, heading)
+
+    def test_references_and_appendix_are_preserved_separately(self):
+        text = ("Abstract\nSummary\n1. Introduction\nIntro\n2. Methods\nMethods text\n"
+                "3. Results\nResults text\n4. Conclusion\nClosing\nReferences\nSmith 2024\n"
+                "Appendix A\nSupplementary table")
+        result = split_sections(text)
+        self.assertIn("Smith 2024", result["references_text"])
+        self.assertIn("Supplementary table", result["appendix_text"])
+        self.assertNotIn("Smith 2024", result["body"])
+        self.assertNotIn("Supplementary table", result["conclusion"])
+
+    def test_caption_is_separate_but_discussion_sentence_remains(self):
+        text = ("1. Introduction\nIntro\n2. Results\nFigure 1. Fandom participation\n"
+                "Figure 3 shows that fan engagement increased (Kim, 2024).\n3. Conclusion\nClosing")
+        result = split_sections(text)
+        self.assertEqual(len(result["captions"]), 1)
+        self.assertIn("Figure 3 shows", result["body"])
+        self.assertNotIn("Figure 1. Fandom", result["body"])
+
+    def test_short_caption_and_its_source_are_not_main_body(self):
+        result = split_sections("1. Introduction\nIntro\n2. Results\nTable 3.\n"
+                                "Source: Survey data\nEngagement increased in the second wave.\n"
+                                "3. Conclusion\nClosing")
+        self.assertEqual(len(result["captions"]), 2)
+        self.assertNotIn("Survey data", result["body"])
+        self.assertIn("Engagement increased", result["body"])
+
+    def test_case_study_heading_separate_and_analysis_retained(self):
+        result = split_sections("1. Introduction\nIntro\n2. Methods\nMethod text\n"
+                                "3. Case Study: BTS\nBTS developed a global fan relationship.\n"
+                                "4. Conclusion\nClosing")
+        case = next(s for s in result["sections"] if "Case Study" in s["heading"])
+        self.assertEqual(case["section_type"], "other")
+        self.assertNotIn("Case Study", case["text"])
+        self.assertIn("BTS developed", result["body"])
+
+    def test_hyphenation_real_hyphen_and_wrapped_line(self):
+        text = clean_pages(["Introduction\nAn inter-\nnational K-pop audience engages with fans\n"
+                            "across multiple countries. Cross-cultural exchange remains valuable."])
+        self.assertIn("international K-pop", text)
+        self.assertIn("fans across", text)
+        self.assertIn("Cross-cultural", text)
+
+    def test_duplicate_paragraph_is_removed_without_short_line_loss(self):
+        paragraph = "This paragraph describes a distinct finding about digital fandom participation. " * 2
+        audit = {}
+        result = clean_pages([paragraph, paragraph, "Conclusion\nImportant result."], audit)
+        self.assertEqual(result.count(paragraph.strip()), 1)
+        self.assertEqual(audit["duplicate_paragraphs_removed"], 1)
+        self.assertIn("Important result", result)
+
+    def test_subsection_inherits_known_canonical_type(self):
+        result = split_sections("4. Discussion\nDiscussion text\n4.2 Global Fandom Activities\n"
+                                "A meaningful analysis sentence.")
+        self.assertEqual(result["sections"][1]["section_type"], "discussion")
+
+    def test_encrypted_pdf_uses_html_fallback_without_replacing_original(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            directory = root / "documents" / "W1"
+            directory.mkdir(parents=True)
+            original = directory / "source.pdf"
+            original.write_bytes(b"%PDF-test-original")
+            fallback = directory / "fallback.html"
+            fallback.write_text("<html>alternative</html>", encoding="utf-8")
+            source = {"format": "pdf", "filename": "source.pdf",
+                      "sha256": hashlib.sha256(original.read_bytes()).hexdigest()}
+            (directory / "source.json").write_text(json.dumps(source), encoding="utf-8")
+            paper = {"id": "W1", "title": "Fandom participation study", "abstract": "English abstract. " * 30,
+                     "language": "en", "source_locations": []}
+            article = ("Abstract\n" + "English abstract. " * 30 + "\n1. Introduction\n"
+                       + "Fandom participation study. " * 30 + "\n2. Methods\n"
+                       + "Participants discussed fandom. " * 90 + "\n3. Results\n"
+                       + "Fans engaged globally. " * 90 + "\n4. Conclusion\n"
+                       + "Fandom communities persisted. " * 30)
+            with patch("pipeline.papers.extractor.process.read_source",
+                       side_effect=[EncryptedPDFError("encrypted"), [article]]), \
+                 patch("pipeline.papers.extractor.process.alternative_source",
+                       return_value=(fallback, {"format": "html", "sha256": "fallbackhash"})):
+                record = process_one(paper, root, root / "processed")
+            self.assertEqual(original.read_bytes(), b"%PDF-test-original")
+            self.assertTrue(record["encrypted_pdf"])
+            self.assertTrue(record["html_fallback_used"])
+            self.assertEqual(record["fulltext_status"], "text_extracted")
+
+    def test_encrypted_without_fallback_is_one_rejected_record(self):
+        papers = [{"id": "W1"}, {"id": "W2"}]
+        with patch("pipeline.papers.extractor.process.process_one",
+                   side_effect=[EncryptedPDFError("encrypted"),
+                                {"id": "W2", "fulltext_status": "text_extracted", "quality_flags": [],
+                                 "training_eligible": True, "english_training_eligible": True,
+                                 "quality_state": "ready", "quality_score": 1.0}]):
+            records, failures = process_records(papers, Path("."), Path("."))
+        self.assertEqual(len(failures), 1)
+        self.assertEqual(records[0]["failure_reason"], "encrypted_pdf_no_fallback")
+        self.assertEqual(records[1]["quality_state"], "ready")
+
+    def test_minimum_is_met_despite_two_document_failures(self):
+        records = [{"english_training_eligible": True} for _ in range(98)] + [
+            {"english_training_eligible": False} for _ in range(2)]
+        self.assertEqual(minimum_exit_code(records, 50), 0)
+
+    def test_minimum_fails_when_only_forty_eligible(self):
+        records = [{"english_training_eligible": True} for _ in range(40)] + [
+            {"english_training_eligible": False} for _ in range(60)]
+        self.assertEqual(minimum_exit_code(records, 50), 1)
 
 
 if __name__ == "__main__":

@@ -91,13 +91,24 @@ jobs:
 
 
       # -------------------------------------------------
-      # 7. Translate Korean news into English for RAG
+      # 7. Resolve verified names before translation
+      # -------------------------------------------------
+      - name: Resolve news entities
+        run: |
+          python -m pipeline.common.entity_resolver \
+            --kind news \
+            --input data/processed/news/news.json \
+            --output data/processed/news/news_resolved.json
+
+      # -------------------------------------------------
+      # 8. Translate Korean news into English for RAG
       # -------------------------------------------------
       - name: Translate Korean news for RAG
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           python -m pipeline.news.translator.translate \
+            --input data/processed/news/news_resolved.json \
             --workers 2 \
             --minimum-ready 1
 

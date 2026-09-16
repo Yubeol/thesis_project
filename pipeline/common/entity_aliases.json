@@ -1,0 +1,24 @@
+[
+  {
+    "entity_type": "Group",
+    "authority_url": "https://bts.ibighit.com/eng/profile/",
+    "name_ko": "방탄소년단",
+    "name_en": "BTS",
+    "aliases": ["Bangtan Sonyeondan"],
+    "source_urls": [
+      "https://bts.ibighit.com/eng/profile/",
+      "https://ibighit.com/bts/kor/profile/index.html"
+    ]
+  },
+  {
+    "entity_type": "Group",
+    "authority_url": "https://ygfamily.com/en/artists/blackpink/profile",
+    "name_ko": "블랙핑크",
+    "name_en": "BLACKPINK",
+    "aliases": [],
+    "source_urls": [
+      "https://ygfamily.com/en/artists/blackpink/profile",
+      "https://www.ygfamily.com/contents/attachments/2023/07/YG%20ENTERTAINMENT%202023%20%EC%A7%80%EC%86%8D%EA%B0%80%EB%8A%A5%EA%B2%BD%EC%98%81%EB%B3%B4%EA%B3%A0%EC%84%9C.pdf"
+    ]
+  }
+]

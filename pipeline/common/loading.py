@@ -72,6 +72,8 @@ def prepare_record(table: str, record: dict) -> dict:
     if table == "papers":
         if not row["title"] or not row["source_url"]:
             raise LoadValidationError("Paper title and source_url are required")
+        if record.get("quality_state") not in (None, "ready"):
+            raise LoadValidationError("Paper is not ready for database loading")
         if {"source_title_mismatch", "text_encoding_damage", "extraction_failed"} & set(record.get("quality_flags", [])):
             raise LoadValidationError("Paper requires source/extraction review before loading")
         if isinstance(row["authors"], list):
@@ -197,9 +199,10 @@ def load(table: str, records: list[dict], env_file: Path, *, apply: bool = False
     return report
 
 
-def main(table: str) -> int:
+def main(table: str, default_input: Path | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", type=Path, default=Path("data/processed") / table / (table + ".json"))
+    parser.add_argument("--input", type=Path,
+                        default=default_input or Path("data/processed") / table / (table + ".json"))
     parser.add_argument("--env-file", type=Path, default=DEFAULT_ENV)
     parser.add_argument("--apply", action="store_true", help="Commit inserts; default performs SELECT-only preflight")
     parser.add_argument("--report", type=Path)

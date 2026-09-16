@@ -117,17 +117,17 @@ jobs:
           python -m pipeline.papers.extractor.process \
             --minimum-english "$MINIMUM"
 
-
       # -------------------------------------------------
-      # 8. Resolve paper entities
+      # 8. Resolve entities only for papers that passed quality checks
       #
-      # 이미 Entity Resolver가 구현된 현재 구조 기준.
-      # 원문은 보존하고 확인된 entity만 정규화한다.
+      # Keep the full processed report, but send only ready papers to DB.
       # -------------------------------------------------
-      - name: Resolve paper entities
+      - name: Resolve ready paper entities
         run: |
           python -m pipeline.common.entity_resolver \
-            --kind papers
+            --kind papers \
+            --input data/processed/papers/papers_ready.json \
+            --output data/processed/papers/papers_ready_resolved.json
 
 
       # -------------------------------------------------
@@ -149,15 +149,15 @@ jobs:
             -print \
             | sort
 
-          if [ ! -f "data/processed/papers/papers_resolved.json" ]; then
-            echo "papers_resolved.json was not created."
+          if [ ! -f "data/processed/papers/papers_ready_resolved.json" ]; then
+            echo "papers_ready_resolved.json was not created."
             exit 1
           fi
 
-          echo "PAPERS_RESOLVED_FILE=FOUND"
+          echo "PAPERS_READY_RESOLVED_FILE=FOUND"
 
           ls -lh \
-            data/processed/papers/papers_resolved.json
+            data/processed/papers/papers_ready_resolved.json
 
 
       # -------------------------------------------------
@@ -217,7 +217,6 @@ jobs:
         with:
           python-version: '3.12'
 
-
       # -------------------------------------------------
       # 13. Install PostgreSQL pipeline dependencies
       # -------------------------------------------------
@@ -247,8 +246,8 @@ jobs:
 
           echo "Checking transferred paper files..."
 
-          if [ ! -f "data/processed/papers/papers_resolved.json" ]; then
-            echo "papers_resolved.json not found after artifact download."
+          if [ ! -f "data/processed/papers/papers_ready_resolved.json" ]; then
+            echo "papers_ready_resolved.json not found after artifact download."
 
             echo "Downloaded files:"
 
@@ -261,10 +260,10 @@ jobs:
             exit 1
           fi
 
-          echo "PAPERS_RESOLVED_FILE=FOUND"
+          echo "PAPERS_READY_RESOLVED_FILE=FOUND"
 
           ls -lh \
-            data/processed/papers/papers_resolved.json
+            data/processed/papers/papers_ready_resolved.json
 
 
       # -------------------------------------------------
@@ -403,7 +402,7 @@ jobs:
       - name: Load processed papers into PostgreSQL
         run: |
           python -m pipeline.papers.loader.postgres \
-            --input data/processed/papers/papers_resolved.json \
+            --input data/processed/papers/papers_ready_resolved.json \
             --env-file "$RUNNER_TEMP/papers-postgres.env" \
             --apply \
             --report data/processed/papers/load_report.json
@@ -437,7 +436,6 @@ jobs:
         run: |
           rm -f \
             "$RUNNER_TEMP/papers-postgres.env"
-
 
       # -------------------------------------------------
       # 21. Preserve final paper artifacts
