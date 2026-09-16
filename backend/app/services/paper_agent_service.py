@@ -15,11 +15,7 @@ def generate_paper(
         topic_ko=topic_ko,
     )
 
-    status = result["status"]
-
-    # -----------------------------------------
-    # Evidence 부족
-    # -----------------------------------------
+    status = result.get("status")
 
     if status == "abstained":
         return {
@@ -27,13 +23,16 @@ def generate_paper(
             "draft": None,
             "character_count": 0,
             "message": result.get(
-                "message"
+                "message",
+                "충분한 근거를 찾지 못했습니다.",
             ),
         }
 
-    # -----------------------------------------
-    # 정상 생성
-    # -----------------------------------------
+    if status != "completed":
+        raise RuntimeError(
+            "Agent가 예상하지 못한 상태를 "
+            f"반환했습니다: {status}"
+        )
 
     draft_ko = result.get("draft_ko")
 
@@ -43,24 +42,36 @@ def generate_paper(
             "최종 한국어 초안이 없습니다."
         )
 
+    required_fields = (
+        "title",
+        "introduction",
+        "body",
+        "conclusion",
+    )
+
+    missing_fields = [
+        field
+        for field in required_fields
+        if not draft_ko.get(field)
+    ]
+
+    if missing_fields:
+        raise RuntimeError(
+            "최종 초안에 필요한 항목이 없습니다: "
+            + ", ".join(missing_fields)
+        )
+
     return {
         "status": "completed",
-
         "draft": {
             "title": draft_ko["title"],
-            "introduction": (
-                draft_ko["introduction"]
-            ),
+            "introduction": draft_ko["introduction"],
             "body": draft_ko["body"],
-            "conclusion": (
-                draft_ko["conclusion"]
-            ),
+            "conclusion": draft_ko["conclusion"],
         },
-
         "character_count": result.get(
             "character_count",
             0,
         ),
-
         "message": None,
     }

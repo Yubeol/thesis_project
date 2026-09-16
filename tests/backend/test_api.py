@@ -191,3 +191,87 @@ def test_generate_empty_title():
     )
 
     assert response.status_code == 422
+
+def test_generate_whitespace_title():
+    """
+    제목이 공백으로만 구성되어 있으면
+    Pydantic validation으로 요청을 거절하는지 확인한다.
+    """
+
+    response = client.post(
+        "/api/generate",
+        json={
+            "title_ko": "   ",
+            "topic_ko": None,
+        },
+    )
+
+    assert response.status_code == 422
+
+
+def test_generate_unexpected_agent_status():
+    """
+    Agent가 예상하지 못한 status를 반환하면
+    서버가 500 오류로 처리하는지 확인한다.
+    """
+
+    mock_result = {
+        "status": "failed",
+        "message": "테스트 오류",
+    }
+
+    with patch(
+        "backend.app.services.paper_agent_service."
+        "run_agent_pipeline",
+        return_value=mock_result,
+    ):
+        response = client.post(
+            "/api/generate",
+            json={
+                "title_ko": "테스트 논문 제목",
+                "topic_ko": None,
+            },
+        )
+
+    assert response.status_code == 500
+
+    data = response.json()
+
+    assert data["detail"] == (
+        "논문 생성 중 내부 오류가 발생했습니다."
+    )
+
+
+def test_generate_missing_draft():
+    """
+    Agent가 completed 상태를 반환했지만
+    최종 draft_ko가 없으면 500 오류로
+    처리하는지 확인한다.
+    """
+
+    mock_result = {
+        "status": "completed",
+        "draft_ko": None,
+        "character_count": 0,
+    }
+
+    with patch(
+        "backend.app.services.paper_agent_service."
+        "run_agent_pipeline",
+        return_value=mock_result,
+    ):
+        response = client.post(
+            "/api/generate",
+            json={
+                "title_ko": "테스트 논문 제목",
+                "topic_ko": None,
+            },
+        )
+
+    assert response.status_code == 500
+
+    data = response.json()
+
+    assert data["detail"] == (
+        "논문 생성 중 내부 오류가 발생했습니다."
+    )
