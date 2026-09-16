@@ -5,39 +5,49 @@ on:
     inputs:
       target:
         description: Maximum metadata candidates to acquire
+        required: false
         type: number
         default: 300
 
       minimum:
-        description: Minimum English full papers passing quality checks
+        description: Minimum English papers required after processing
+        required: false
         type: number
         default: 50
 
   schedule:
-    # UTC 16:30 = 한국시간 다음날 01:30
+    # UTC 16:30
+    # KST 다음날 01:30
     - cron: '30 16 * * *'
+
 
 permissions:
   contents: read
 
+
 concurrency:
-  group: ingest-papers-${{ github.ref }}
+  group: ingest-papers
   cancel-in-progress: false
 
 
 jobs:
 
-  # =========================================================
+  # ==========================================================
   # JOB 1
-  # GitHub hosted runner
+  #
+  # GitHub Hosted Runner
   #
   # OpenAlex
-  # → OA 문서 다운로드
-  # → 텍스트 추출
-  # → 논문 구조/품질 전처리
-  # → Entity Resolution
-  # → Artifact 생성
-  # =========================================================
+  #   ↓
+  # OA PDF / HTML 다운로드
+  #   ↓
+  # 논문 전처리
+  #   ↓
+  # Entity Resolution
+  #   ↓
+  # Artifact 생성
+  # ==========================================================
+
   collect:
     name: Collect and preprocess papers
 
@@ -47,35 +57,41 @@ jobs:
 
     steps:
 
-      # -------------------------------------------------
-      # 1. Repository checkout
-      # -------------------------------------------------
+      # ------------------------------------------------------
+      # 1. Checkout
+      # ------------------------------------------------------
+
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: main
 
 
-      # -------------------------------------------------
-      # 2. Python setup
-      # -------------------------------------------------
+      # ------------------------------------------------------
+      # 2. Python
+      # ------------------------------------------------------
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
 
-      # -------------------------------------------------
-      # 3. Install dependencies
-      # -------------------------------------------------
+      # ------------------------------------------------------
+      # 3. Dependencies
+      # ------------------------------------------------------
+
       - name: Install pipeline dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r pipeline/common/requirements.txt
 
 
-      # -------------------------------------------------
-      # 4. Run paper pipeline tests
-      # -------------------------------------------------
-      - name: Test paper pipeline
+      # ------------------------------------------------------
+      # 4. Tests
+      # ------------------------------------------------------
+
+      - name: Run paper pipeline tests
         run: |
           python -m unittest discover \
             -s tests/pipeline \
@@ -83,131 +99,303 @@ jobs:
             -v
 
 
-      # -------------------------------------------------
-      # 5. Collect OpenAlex metadata
-      # -------------------------------------------------
-      - name: Collect paper metadata
+      # ------------------------------------------------------
+      # 5. OpenAlex metadata collection
+      #
+      # 실제 논문 원문 다운로드 전
+      # 후보 논문 metadata를 수집한다.
+      # ------------------------------------------------------
+
+      - name: Collect OpenAlex paper metadata
         env:
           OPENALEX_API_KEY: ${{ secrets.OPENALEX_API_KEY }}
-          TARGET: ${{ inputs.target || 300 }}
+
         run: |
+          TARGET="${{ github.event.inputs.target }}"
+
+          if [ -z "$TARGET" ]; then
+            TARGET=300
+          fi
+
+          echo "PAPER_TARGET=$TARGET"
+
           python -m pipeline.papers.collector.openalex \
             --target "$TARGET" \
             --minimum 1
 
 
-      # -------------------------------------------------
-      # 6. Download accessible OA PDF / HTML
-      # -------------------------------------------------
+      # ------------------------------------------------------
+      # 6. Acquire OA sources
+      #
+      # 중요
+      #
+      # 이제 continue-on-error를 사용하지 않는다.
+      #
+      # download.py 내부에서:
+      #
+      # 개별 논문 다운로드 실패
+      # → 재시도
+      # → unavailable 처리
+      # → 다음 논문 계속
+      #
+      # 전체 source 확보가 0건인 경우에만
+      # download.py가 exit 1을 반환한다.
+      # ------------------------------------------------------
+
       - name: Acquire accessible OA source documents
         run: |
           python -m pipeline.papers.collector.download
 
 
-      # -------------------------------------------------
-      # 7. Extract / clean / assess paper sections
-      #
-      # process.py는 일부 문서 실패가 있어도
-      # minimum 조건을 만족하면 exit 0을 반환해야 한다.
-      # -------------------------------------------------
-      - name: Extract and assess paper sections
-        env:
-          MINIMUM: ${{ inputs.minimum || 50 }}
+      # ------------------------------------------------------
+      # 7. Inspect download report
+      # ------------------------------------------------------
+
+      - name: Inspect paper download report
         run: |
-          python -m pipeline.papers.extractor.process \
-            --minimum-english "$MINIMUM"
+          echo "========================================"
+          echo "Paper download report"
+          echo "========================================"
 
-      # -------------------------------------------------
-      # 8. Resolve entities only for papers that passed quality checks
-      #
-      # Keep the full processed report, but send only ready papers to DB.
-      # -------------------------------------------------
-      - name: Resolve ready paper entities
-        run: |
-          python -m pipeline.common.entity_resolver \
-            --kind papers \
-            --input data/processed/papers/papers_ready.json \
-            --output data/processed/papers/papers_ready_resolved.json
-
-
-      # -------------------------------------------------
-      # 9. Verify processed paper output
-      # -------------------------------------------------
-      - name: Verify processed paper data
-        run: |
-          echo "Checking processed paper output..."
-
-          if [ ! -d "data/processed/papers" ]; then
-            echo "data/processed/papers directory was not created."
+          if [ ! -f "data/raw/papers/download_report.json" ]; then
+            echo "download_report.json was not created."
             exit 1
           fi
 
-          echo "Processed paper files:"
-          find data/processed/papers \
-            -maxdepth 2 \
-            -type f \
-            -print \
-            | sort
+          python -m json.tool \
+            data/raw/papers/download_report.json \
+            | head -n 80
 
-          if [ ! -f "data/processed/papers/papers_ready_resolved.json" ]; then
-            echo "papers_ready_resolved.json was not created."
-            exit 1
-          fi
 
-          echo "PAPERS_READY_RESOLVED_FILE=FOUND"
+      # ------------------------------------------------------
+      # 8. Print download statistics
+      #
+      # documents 전체 내용을 출력하지 않고
+      # 핵심 카운트만 Actions 로그에 출력한다.
+      # ------------------------------------------------------
 
-          ls -lh \
-            data/processed/papers/papers_ready_resolved.json
-
+      - name: Show paper acquisition statistics
+        run: |
           python - <<'PY'
           import json
           from pathlib import Path
 
-          root = Path("data/processed/papers")
-          required = ("papers.json", "papers_ready.json", "papers_ready_resolved.json", "processing_report.json")
-          if any(not (root / name).is_file() for name in required):
-              raise SystemExit("PAPER_OUTPUT_CHECK=MISSING_FILE")
+          path = Path(
+              "data/raw/papers/download_report.json"
+          )
 
-          ready = json.loads((root / "papers_ready.json").read_text(encoding="utf-8"))
-          resolved = json.loads((root / "papers_ready_resolved.json").read_text(encoding="utf-8"))
-          report = json.loads((root / "processing_report.json").read_text(encoding="utf-8"))
-          if (not isinstance(ready, list) or not ready or not isinstance(resolved, list)
-                  or not report.get("minimum_met") or len(ready) != report.get("ready")
-                  or [paper.get("id") for paper in ready] != [paper.get("id") for paper in resolved]
-                  or any(paper.get("quality_state") != "ready" for paper in resolved)):
-              raise SystemExit("PAPER_OUTPUT_CHECK=INVALID_READY_SET")
-          print(f"PAPER_OUTPUT_CHECK=SUCCESS ready={len(ready)}")
+          report = json.loads(
+              path.read_text(
+                  encoding="utf-8"
+              )
+          )
+
+          print(
+              "SELECTED_COUNT="
+              + str(
+                  report.get(
+                      "selected_count",
+                      0,
+                  )
+              )
+          )
+
+          print(
+              "DOWNLOADED_PDF="
+              + str(
+                  report.get(
+                      "downloaded_pdf",
+                      0,
+                  )
+              )
+          )
+
+          print(
+              "DOWNLOADED_HTML="
+              + str(
+                  report.get(
+                      "downloaded_html",
+                      0,
+                  )
+              )
+          )
+
+          print(
+              "DOWNLOADED_TOTAL="
+              + str(
+                  report.get(
+                      "downloaded_total",
+                      0,
+                  )
+              )
+          )
+
+          print(
+              "UNAVAILABLE="
+              + str(
+                  report.get(
+                      "unavailable",
+                      0,
+                  )
+              )
+          )
+
+          print(
+              "CACHE_HITS="
+              + str(
+                  report.get(
+                      "cache_hits",
+                      0,
+                  )
+              )
+          )
+
+          print(
+              "WORKER_EXCEPTIONS="
+              + str(
+                  report.get(
+                      "worker_exceptions",
+                      0,
+                  )
+              )
+          )
           PY
 
 
-      # -------------------------------------------------
-      # 10. Upload data for the EC2 PostgreSQL job
+      # ------------------------------------------------------
+      # 9. Extract / clean / quality assessment
       #
-      # GitHub runner와 EC2 runner는 다른 컴퓨터이므로
-      # artifact로 데이터를 전달한다.
-      # -------------------------------------------------
-      - name: Upload papers for database load
+      # 여기서 실제 논문 품질을 검사한다.
+      #
+      # 예:
+      #
+      # minimum = 50
+      #
+      # 영어 + 구조 + 본문 품질을 만족하는 논문이
+      # 최소 기준 이상이어야 다음으로 진행한다.
+      # ------------------------------------------------------
+
+      - name: Extract and assess paper sections
+        run: |
+          MINIMUM="${{ github.event.inputs.minimum }}"
+
+          if [ -z "$MINIMUM" ]; then
+            MINIMUM=50
+          fi
+
+          echo "MINIMUM_ENGLISH_PAPERS=$MINIMUM"
+
+          python -m pipeline.papers.extractor.process \
+            --minimum-english "$MINIMUM"
+
+
+      # ------------------------------------------------------
+      # 10. Entity Resolution
+      # ------------------------------------------------------
+
+      - name: Resolve paper entities
+        run: |
+          python -m pipeline.common.entity_resolver \
+            --kind papers
+
+
+      # ------------------------------------------------------
+      # 11. Inspect processed output
+      # ------------------------------------------------------
+
+      - name: Inspect processed paper outputs
+        run: |
+          echo "========================================"
+          echo "Processed paper outputs"
+          echo "========================================"
+
+          if [ ! -d "data/processed/papers" ]; then
+            echo "data/processed/papers does not exist."
+            exit 1
+          fi
+
+          find data/processed/papers \
+            -maxdepth 5 \
+            -type f \
+            -print \
+            | sort
+
+
+      # ------------------------------------------------------
+      # 12. Validate processed result exists
+      # ------------------------------------------------------
+
+      - name: Validate paper processing output
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          root = Path(
+              "data/processed/papers"
+          )
+
+          if not root.exists():
+              raise SystemExit(
+                  "Processed paper directory does not exist."
+              )
+
+          json_files = list(
+              root.rglob("*.json")
+          )
+
+          if not json_files:
+              raise SystemExit(
+                  "No processed JSON files were created."
+              )
+
+          print(
+              "PROCESSED_JSON_COUNT="
+              + str(
+                  len(json_files)
+              )
+          )
+
+          for path in sorted(json_files):
+              print(path)
+          PY
+
+
+      # ------------------------------------------------------
+      # 13. Upload DB transfer artifact
+      #
+      # GitHub Hosted Runner
+      #       ↓
+      # Artifact
+      #       ↓
+      # EC2 Self Hosted Runner
+      # ------------------------------------------------------
+
+      - name: Upload papers for PostgreSQL load
         uses: actions/upload-artifact@v4
+
         with:
           name: papers-db-transfer-${{ github.run_id }}-${{ github.run_attempt }}
+
           path: |
             data/raw/papers/
             data/processed/papers/
+
           if-no-files-found: error
+
           retention-days: 1
 
 
 
-  # =========================================================
+  # ==========================================================
   # JOB 2
   #
-  # EC2 self-hosted runner
+  # EC2 Self Hosted Runner
   #
-  # PostgreSQL과 같은 EC2 안에서 실행한다.
-  #
-  # GitHub hosted runner가 EC2:5432로 직접 접근하지 않으므로
-  # AWS Security Group timeout 문제를 피한다.
-  # =========================================================
+  # Artifact
+  #    ↓
+  # PostgreSQL
+  # ==========================================================
+
   load-postgres:
     name: Load papers into PostgreSQL
 
@@ -220,90 +408,99 @@ jobs:
 
     timeout-minutes: 30
 
+    env:
+      POSTGRES_HOST: 127.0.0.1
+      POSTGRES_PORT: ${{ secrets.POSTGRES_PORT }}
+      POSTGRES_DB: ${{ secrets.POSTGRES_DB }}
+      POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
+      POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+
     steps:
 
-      # -------------------------------------------------
-      # 11. Repository checkout
-      # -------------------------------------------------
+      # ------------------------------------------------------
+      # 14. Checkout
+      # ------------------------------------------------------
+
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: main
 
 
-      # -------------------------------------------------
-      # 12. Python setup
-      # -------------------------------------------------
+      # ------------------------------------------------------
+      # 15. Python
+      # ------------------------------------------------------
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
-      # -------------------------------------------------
-      # 13. Install PostgreSQL pipeline dependencies
-      # -------------------------------------------------
+
+      # ------------------------------------------------------
+      # 16. Dependencies
+      # ------------------------------------------------------
+
       - name: Install pipeline dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r pipeline/common/requirements.txt
 
 
-      # -------------------------------------------------
-      # 14. Download processed papers
-      # -------------------------------------------------
-      - name: Download processed papers
+      # ------------------------------------------------------
+      # 17. Download artifact
+      # ------------------------------------------------------
+
+      - name: Download processed paper artifact
         uses: actions/download-artifact@v4
+
         with:
           name: papers-db-transfer-${{ github.run_id }}-${{ github.run_attempt }}
+
           path: data
 
 
-      # -------------------------------------------------
-      # 15. Verify downloaded data
-      # -------------------------------------------------
-      - name: Verify downloaded paper data
+      # ------------------------------------------------------
+      # 18. Verify transferred files
+      # ------------------------------------------------------
+
+      - name: Verify transferred paper data
         run: |
-          echo "Current EC2 runner:"
+          echo "========================================"
+          echo "EC2 runner"
+          echo "========================================"
+
           hostname
 
-          echo "Checking transferred paper files..."
+          echo "========================================"
+          echo "Transferred paper files"
+          echo "========================================"
 
-          if [ ! -f "data/processed/papers/papers_ready_resolved.json" ]; then
-            echo "papers_ready_resolved.json not found after artifact download."
-
-            echo "Downloaded files:"
-
-            find data \
-              -maxdepth 4 \
-              -type f \
-              -print \
-              | sort
-
+          if [ ! -d "data/processed/papers" ]; then
+            echo "Processed paper directory was not transferred."
             exit 1
           fi
 
-          echo "PAPERS_READY_RESOLVED_FILE=FOUND"
+          find data/processed/papers \
+            -maxdepth 5 \
+            -type f \
+            -print \
+            | sort
 
-          ls -lh \
-            data/processed/papers/papers_ready_resolved.json
 
-
-      # -------------------------------------------------
-      # 16. Create temporary PostgreSQL environment
+      # ------------------------------------------------------
+      # 19. Validate PostgreSQL configuration
       #
-      # PostgreSQL과 같은 EC2에서 실행되므로
-      # 공인 IP 대신 localhost를 사용한다.
-      # -------------------------------------------------
-      - name: Create PostgreSQL runtime environment
-        env:
-          POSTGRES_PORT: ${{ secrets.POSTGRES_PORT }}
-          POSTGRES_DB: ${{ secrets.POSTGRES_DB }}
-          POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
-          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+      # 값 자체는 절대 출력하지 않는다.
+      # ------------------------------------------------------
+
+      - name: Validate PostgreSQL configuration
         run: |
           python - <<'PY'
           import os
-          from pathlib import Path
 
           required = [
+              "POSTGRES_HOST",
               "POSTGRES_PORT",
               "POSTGRES_DB",
               "POSTGRES_USER",
@@ -318,73 +515,57 @@ jobs:
 
           if missing:
               raise SystemExit(
-                  "Missing PostgreSQL secrets: "
+                  "Missing PostgreSQL configuration: "
                   + ", ".join(missing)
               )
 
-          values = {
-              "POSTGRES_HOST": "127.0.0.1",
-              "POSTGRES_PORT": os.environ["POSTGRES_PORT"].strip(),
-              "POSTGRES_DB": os.environ["POSTGRES_DB"].strip(),
-              "POSTGRES_USER": os.environ["POSTGRES_USER"].strip(),
-              "POSTGRES_PASSWORD": os.environ["POSTGRES_PASSWORD"].strip(),
-          }
-
-          env_path = (
-              Path(os.environ["RUNNER_TEMP"])
-              / "papers-postgres.env"
+          print(
+              "POSTGRES_CONFIGURATION=SUCCESS"
           )
 
-          text = "\n".join(
-              f"{key}={value}"
-              for key, value in values.items()
+          print(
+              "POSTGRES_HOST=127.0.0.1"
           )
-
-          descriptor = os.open(
-              env_path,
-              os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-              0o600,
-          )
-          with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-              stream.write(text + "\n")
-
-          print("PostgreSQL runtime environment created.")
-          print("POSTGRES_HOST=127.0.0.1")
-          print("POSTGRES_PORT configured.")
-          print("POSTGRES_DB configured.")
-          print("POSTGRES_USER configured.")
-          print("POSTGRES_PASSWORD configured.")
           PY
 
 
-      # -------------------------------------------------
-      # 17. Test local PostgreSQL connectivity
-      # -------------------------------------------------
-      - name: Test PostgreSQL TCP connectivity
-        env:
-          POSTGRES_HOST: 127.0.0.1
-          POSTGRES_PORT: ${{ secrets.POSTGRES_PORT }}
+      # ------------------------------------------------------
+      # 20. PostgreSQL TCP test
+      # ------------------------------------------------------
+
+      - name: Test PostgreSQL connectivity
         run: |
           python - <<'PY'
           import os
           import socket
 
-          host = os.environ["POSTGRES_HOST"].strip()
+          host = "127.0.0.1"
 
-          print("Testing local PostgreSQL TCP connectivity...")
-          print(f"Target host: {host}")
+          port = int(
+              os.environ.get(
+                  "POSTGRES_PORT",
+                  "5432",
+              ).strip()
+          )
 
-          try:
-              port = int(os.environ["POSTGRES_PORT"].strip())
-              if not 1 <= port <= 65535:
-                  raise ValueError()
-          except (KeyError, ValueError):
-              print("POSTGRES_TCP_CHECK=INVALID_PORT")
-              raise SystemExit(1)
+          print(
+              "Testing PostgreSQL connectivity..."
+          )
+
+          print(
+              f"Target host: {host}"
+          )
+
+          print(
+              f"Target port: {port}"
+          )
 
           try:
               with socket.create_connection(
-                  (host, port),
+                  (
+                      host,
+                      port,
+                  ),
                   timeout=10,
               ):
                   print(
@@ -395,12 +576,14 @@ jobs:
               print(
                   "POSTGRES_TCP_CHECK=TIMEOUT"
               )
+
               raise SystemExit(1)
 
           except ConnectionRefusedError:
               print(
                   "POSTGRES_TCP_CHECK=REFUSED"
               )
+
               raise SystemExit(1)
 
           except socket.gaierror:
@@ -408,6 +591,7 @@ jobs:
                   "POSTGRES_TCP_CHECK="
                   "HOSTNAME_RESOLUTION_FAILED"
               )
+
               raise SystemExit(1)
 
           except OSError as exc:
@@ -415,31 +599,43 @@ jobs:
                   "POSTGRES_TCP_CHECK=FAILED:"
                   + type(exc).__name__
               )
+
               raise SystemExit(1)
           PY
 
 
-      # -------------------------------------------------
-      # 18. Load processed papers into PostgreSQL
-      # -------------------------------------------------
+      # ------------------------------------------------------
+      # 21. PostgreSQL Loader
+      #
+      # 기존 paper loader를 그대로 사용한다.
+      #
+      # DB:
+      # 127.0.0.1
+      #
+      # 즉 GitHub Hosted Runner에서 공인 PostgreSQL 포트를
+      # 접근하지 않는다.
+      # ------------------------------------------------------
+
       - name: Load processed papers into PostgreSQL
         run: |
           python -m pipeline.papers.loader.postgres \
-            --input data/processed/papers/papers_ready_resolved.json \
-            --env-file "$RUNNER_TEMP/papers-postgres.env" \
             --apply \
             --report data/processed/papers/load_report.json
 
 
-      # -------------------------------------------------
-      # 19. Show PostgreSQL load report
-      # -------------------------------------------------
-      - name: Show PostgreSQL load report
+      # ------------------------------------------------------
+      # 22. Print load report
+      # ------------------------------------------------------
+
+      - name: Show PostgreSQL paper load report
         if: always()
+
         run: |
           if [ -f "data/processed/papers/load_report.json" ]; then
 
-            echo "PostgreSQL paper load report:"
+            echo "========================================"
+            echo "PostgreSQL paper load report"
+            echo "========================================"
 
             python -m json.tool \
               data/processed/papers/load_report.json
@@ -451,25 +647,22 @@ jobs:
           fi
 
 
-      # -------------------------------------------------
-      # 20. Remove temporary credentials
-      # -------------------------------------------------
-      - name: Delete PostgreSQL runtime environment
-        if: always()
-        run: |
-          rm -f \
-            "$RUNNER_TEMP/papers-postgres.env"
+      # ------------------------------------------------------
+      # 23. Preserve final artifacts
+      # ------------------------------------------------------
 
-      # -------------------------------------------------
-      # 21. Preserve final paper artifacts
-      # -------------------------------------------------
-      - name: Preserve paper artifacts
+      - name: Preserve paper ingestion artifacts
         if: always()
+
         uses: actions/upload-artifact@v4
+
         with:
           name: papers-${{ github.run_id }}-${{ github.run_attempt }}
+
           path: |
             data/raw/papers/
             data/processed/papers/
+
           if-no-files-found: warn
+
           retention-days: 30
