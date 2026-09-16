@@ -42,6 +42,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r pipeline/common/requirements.txt
           python -m pip install "openai>=2,<3"
+          python -m pip install "psycopg[binary]>=3,<4" pgvector tiktoken python-dotenv
 
       # -------------------------------------------------
       # 4. Run unit tests
@@ -204,9 +205,100 @@ jobs:
             --env-file .env.runtime \
             --apply \
             --report data/processed/news/load_report.json
+          
+      # -------------------------------------------------
+      # 11. Chunk and embed newly loaded news for RAG
+      # -------------------------------------------------
+      - name: Index new news for RAG
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_EMBEDDING_MODEL: text-embedding-3-small
+
+          POSTGRES_HOST: ${{ secrets.POSTGRES_HOST }}
+          POSTGRES_PORT: ${{ secrets.POSTGRES_PORT }}
+          POSTGRES_DB: ${{ secrets.POSTGRES_DB }}
+          POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+
+          RAG_CHUNK_TOKENS: "700"
+          RAG_CHUNK_OVERLAP: "100"
+
+        run: |
+          python - <<'PY'
+          from rag.embedding.indexer import index_news
+
+          result = index_news(
+              force=False,
+          )
+
+          print("NEWS_RAG_INDEX_RESULT:")
+          print(result)
+          PY
 
       # -------------------------------------------------
-      # 11. Remove temporary database credentials
+      # 12. Verify RAG indexing result
+      # -------------------------------------------------
+      - name: Verify news RAG indexing
+        env:
+          POSTGRES_HOST: ${{ secrets.POSTGRES_HOST }}
+          POSTGRES_PORT: ${{ secrets.POSTGRES_PORT }}
+          POSTGRES_DB: ${{ secrets.POSTGRES_DB }}
+          POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+
+        run: |
+          python - <<'PY'
+          from rag.vector import get_connection
+
+          with get_connection() as conn:
+              news_count = conn.execute(
+                  "SELECT COUNT(*) FROM news"
+              ).fetchone()[0]
+
+              chunk_count = conn.execute(
+                  "SELECT COUNT(*) FROM news_chunks"
+              ).fetchone()[0]
+
+              missing_embedding = conn.execute(
+                  """
+                  SELECT COUNT(*)
+                  FROM news_chunks
+                  WHERE embedding IS NULL
+                  """
+              ).fetchone()[0]
+
+              unindexed_news = conn.execute(
+                  """
+                  SELECT COUNT(*)
+                  FROM news AS n
+                  WHERE NOT EXISTS (
+                      SELECT 1
+                      FROM news_chunks AS nc
+                      WHERE nc.news_id = n.news_id
+                  )
+                  """
+              ).fetchone()[0]
+
+          print(f"NEWS_COUNT={news_count}")
+          print(f"NEWS_CHUNKS={chunk_count}")
+          print(
+              "MISSING_EMBEDDING="
+              f"{missing_embedding}"
+          )
+          print(
+              "UNINDEXED_NEWS="
+              f"{unindexed_news}"
+          )
+
+          if missing_embedding != 0:
+              raise SystemExit(
+                  "Found news chunks "
+                  "without embeddings."
+              )
+          PY
+
+      # -------------------------------------------------
+      # 14. Remove temporary database credentials
       # -------------------------------------------------
       - name: Delete PostgreSQL runtime environment
         if: always()
@@ -214,7 +306,7 @@ jobs:
           rm -f .env.runtime
 
       # -------------------------------------------------
-      # 12. Preserve pipeline artifacts
+      # 15. Preserve pipeline artifacts
       # -------------------------------------------------
       - name: Preserve news artifacts
         if: always()
