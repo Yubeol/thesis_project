@@ -12,8 +12,10 @@ def search_news_vector(
     top_k: int = DEFAULT_TOP_K,
 ) -> list[dict]:
     """
-    영문 Query와 의미적으로 가까운
-    뉴스 Chunk Top-K를 검색한다.
+    영문 Query와 의미적으로 가까운 뉴스들을 검색한다.
+
+    같은 뉴스에 여러 Chunk가 검색될 경우,
+    뉴스별 similarity가 가장 높은 Chunk 1개만 반환한다.
     """
 
     if not query_en or not query_en.strip():
@@ -27,29 +29,55 @@ def search_news_vector(
     )
 
     sql = """
+        WITH ranked_chunks AS (
+            SELECT
+                nc.chunk_id,
+                nc.news_id,
+                nc.chunk_index,
+                nc.content_en,
+
+                n.title_original,
+                n.title_en_for_rag,
+                n.original_language,
+                n.published_at,
+                n.source,
+                n.url,
+
+                1 - (nc.embedding <=> %s) AS similarity,
+
+                ROW_NUMBER() OVER (
+                    PARTITION BY nc.news_id
+                    ORDER BY nc.embedding <=> %s
+                ) AS news_rank
+
+            FROM news_chunks AS nc
+
+            JOIN news AS n
+                ON n.news_id = nc.news_id
+
+            WHERE nc.embedding IS NOT NULL
+        )
+
         SELECT
-            nc.chunk_id,
-            nc.news_id,
-            nc.chunk_index,
-            nc.content_en,
+            chunk_id,
+            news_id,
+            chunk_index,
+            content_en,
 
-            n.title_original,
-            n.title_en_for_rag,
-            n.original_language,
-            n.published_at,
-            n.source,
-            n.url,
+            title_original,
+            title_en_for_rag,
+            original_language,
+            published_at,
+            source,
+            url,
 
-            1 - (nc.embedding <=> %s) AS similarity
+            similarity
 
-        FROM news_chunks AS nc
+        FROM ranked_chunks
 
-        JOIN news AS n
-            ON n.news_id = nc.news_id
+        WHERE news_rank = 1
 
-        WHERE nc.embedding IS NOT NULL
-
-        ORDER BY nc.embedding <=> %s
+        ORDER BY similarity DESC
 
         LIMIT %s;
     """
