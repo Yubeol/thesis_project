@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       target:
-        description: Maximum metadata candidates to acquire
+        description: New OpenAlex metadata candidates to acquire
         required: false
         type: number
         default: 300
@@ -16,44 +16,45 @@ on:
         default: 50
 
   schedule:
-    # UTC 16:30
-    # KST 다음날 01:30
+    # UTC 16:30 = KST next day 01:30
     - cron: '30 16 * * *'
-
 
 permissions:
   contents: read
-
 
 concurrency:
   group: ingest-papers
   cancel-in-progress: false
 
-
 jobs:
 
   # ==========================================================
-  # JOB 1
+  # JOB 0
   #
-  # GitHub Hosted Runner
+  # EC2 Self-hosted Runner
   #
-  # OpenAlex
+  # PostgreSQL
   #   ↓
-  # OA PDF / HTML 다운로드
+  # 기존 papers 식별정보 snapshot
   #   ↓
-  # 논문 전처리
-  #   ↓
-  # Entity Resolution
-  #   ↓
-  # Artifact 생성
+  # Artifact
   # ==========================================================
 
-  collect:
-    name: Collect and preprocess papers
+  snapshot-existing-papers:
+    name: Snapshot existing PostgreSQL papers
 
-    runs-on: ubuntu-latest
+    runs-on:
+      - self-hosted
+      - ec2-db
 
-    timeout-minutes: 120
+    timeout-minutes: 20
+
+    env:
+      POSTGRES_HOST: 127.0.0.1
+      POSTGRES_PORT: ${{ secrets.POSTGRES_PORT }}
+      POSTGRES_DB: ${{ secrets.POSTGRES_DB }}
+      POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
+      POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
 
     steps:
 
@@ -88,7 +89,283 @@ jobs:
 
 
       # ------------------------------------------------------
-      # 4. Tests
+      # 4. PostgreSQL config
+      # ------------------------------------------------------
+
+      - name: Validate PostgreSQL configuration
+        run: |
+          python - <<'PY'
+          import os
+
+          required = [
+              "POSTGRES_HOST",
+              "POSTGRES_PORT",
+              "POSTGRES_DB",
+              "POSTGRES_USER",
+              "POSTGRES_PASSWORD",
+          ]
+
+          missing = [
+              key
+              for key in required
+              if not os.environ.get(key)
+          ]
+
+          if missing:
+              raise SystemExit(
+                  "Missing PostgreSQL configuration: "
+                  + ", ".join(missing)
+              )
+
+          print(
+              "POSTGRES_CONFIGURATION=SUCCESS"
+          )
+          PY
+
+
+      # ------------------------------------------------------
+      # 5. TCP connectivity
+      # ------------------------------------------------------
+
+      - name: Test PostgreSQL connectivity
+        run: |
+          python - <<'PY'
+          import os
+          import socket
+
+          host = "127.0.0.1"
+
+          port = int(
+              os.environ.get(
+                  "POSTGRES_PORT",
+                  "5432",
+              ).strip()
+          )
+
+          try:
+              with socket.create_connection(
+                  (
+                      host,
+                      port,
+                  ),
+                  timeout=10,
+              ):
+                  print(
+                      "POSTGRES_TCP_CHECK=SUCCESS"
+                  )
+
+          except TimeoutError:
+              print(
+                  "POSTGRES_TCP_CHECK=TIMEOUT"
+              )
+
+              raise SystemExit(1)
+
+          except ConnectionRefusedError:
+              print(
+                  "POSTGRES_TCP_CHECK=REFUSED"
+              )
+
+              raise SystemExit(1)
+
+          except OSError as exc:
+              print(
+                  "POSTGRES_TCP_CHECK=FAILED:"
+                  + type(exc).__name__
+              )
+
+              raise SystemExit(1)
+          PY
+
+
+      # ------------------------------------------------------
+      # 6. Existing paper snapshot
+      #
+      # title은 추적/검사용으로 포함한다.
+      #
+      # 실제 OpenAlex 사전 중복 판정은:
+      # - DOI
+      # - source_url
+      # - OpenAlex W ID
+      #
+      # 최종 DB loader는 기존 content_hash 검사도 수행한다.
+      # ------------------------------------------------------
+
+      - name: Export existing paper identities
+        run: |
+          python - <<'PY'
+          from datetime import datetime, timezone
+          import json
+          from pathlib import Path
+
+          from pipeline.common.database import connect
+
+          output = Path(
+              "data/state/existing_papers.json"
+          )
+
+          output.parent.mkdir(
+              parents=True,
+              exist_ok=True,
+          )
+
+          with connect(
+              read_only=True
+          ) as conn:
+
+              with conn.cursor() as cursor:
+
+                  cursor.execute(
+                      """
+                      SELECT
+                          title,
+                          doi,
+                          source_url
+                      FROM public.papers
+                      ORDER BY paper_id
+                      """
+                  )
+
+                  rows = (
+                      cursor.fetchall()
+                  )
+
+          payload = {
+              "schema_version": 1,
+
+              "exported_at":
+                  datetime.now(
+                      timezone.utc
+                  ).isoformat(),
+
+              "paper_count":
+                  len(rows),
+
+              "papers": [
+                  {
+                      "title":
+                          row[0],
+
+                      "doi":
+                          row[1],
+
+                      "source_url":
+                          row[2],
+                  }
+                  for row in rows
+              ],
+          }
+
+          temp = output.with_suffix(
+              ".tmp"
+          )
+
+          temp.write_text(
+              json.dumps(
+                  payload,
+                  ensure_ascii=False,
+                  indent=2,
+              )
+              + "\n",
+              encoding="utf-8",
+          )
+
+          temp.replace(
+              output
+          )
+
+          print(
+              "EXISTING_PAPER_COUNT="
+              + str(
+                  len(rows)
+              )
+          )
+
+          print(
+              "EXISTING_PAPER_SNAPSHOT=SUCCESS"
+          )
+          PY
+
+
+      # ------------------------------------------------------
+      # 7. Upload snapshot
+      # ------------------------------------------------------
+
+      - name: Upload existing paper snapshot
+        uses: actions/upload-artifact@v4
+
+        with:
+          name: paper-existing-snapshot-${{ github.run_id }}-${{ github.run_attempt }}
+
+          path: data/state/existing_papers.json
+
+          if-no-files-found: error
+
+          retention-days: 1
+
+
+
+  # ==========================================================
+  # JOB 1
+  #
+  # GitHub Hosted Runner
+  #
+  # DB Snapshot
+  #   ↓
+  # OpenAlex
+  #   ↓
+  # 신규 후보만 선택
+  #   ↓
+  # PDF / HTML
+  #   ↓
+  # 전처리
+  # ==========================================================
+
+  collect:
+    name: Collect and preprocess new papers
+
+    needs:
+      - snapshot-existing-papers
+
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 120
+
+    steps:
+
+      # ------------------------------------------------------
+      # 8. Checkout
+      # ------------------------------------------------------
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+
+      # ------------------------------------------------------
+      # 9. Python
+      # ------------------------------------------------------
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+
+        with:
+          python-version: '3.12'
+
+
+      # ------------------------------------------------------
+      # 10. Dependencies
+      # ------------------------------------------------------
+
+      - name: Install pipeline dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r pipeline/common/requirements.txt
+
+
+      # ------------------------------------------------------
+      # 11. Tests
       # ------------------------------------------------------
 
       - name: Run paper pipeline tests
@@ -100,13 +377,82 @@ jobs:
 
 
       # ------------------------------------------------------
-      # 5. OpenAlex metadata collection
-      #
-      # 실제 논문 원문 다운로드 전
-      # 후보 논문 metadata를 수집한다.
+      # 12. Download DB snapshot
       # ------------------------------------------------------
 
-      - name: Collect OpenAlex paper metadata
+      - name: Download existing paper snapshot
+        uses: actions/download-artifact@v4
+
+        with:
+          name: paper-existing-snapshot-${{ github.run_id }}-${{ github.run_attempt }}
+
+          path: data/state
+
+
+      # ------------------------------------------------------
+      # 13. Verify snapshot
+      # ------------------------------------------------------
+
+      - name: Verify existing paper snapshot
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path(
+              "data/state/existing_papers.json"
+          )
+
+          if not path.is_file():
+              raise SystemExit(
+                  "existing_papers.json "
+                  "was not downloaded"
+              )
+
+          payload = json.loads(
+              path.read_text(
+                  encoding="utf-8"
+              )
+          )
+
+          papers = payload.get(
+              "papers"
+          )
+
+          if not isinstance(
+              papers,
+              list,
+          ):
+              raise SystemExit(
+                  "existing_papers.json "
+                  "does not contain papers list"
+              )
+
+          print(
+              "EXISTING_PAPER_COUNT="
+              + str(
+                  len(papers)
+              )
+          )
+
+          print(
+              "EXISTING_PAPER_SNAPSHOT=READY"
+          )
+          PY
+
+
+      # ------------------------------------------------------
+      # 14. OpenAlex
+      #
+      # target=300은 이제
+      # "DB에 없는 신규 후보 300개"라는 의미.
+      #
+      # 각 query 최대 20페이지까지 탐색하지만
+      # 신규 unique 후보 300개를 채우면 즉시 종료한다.
+      # ------------------------------------------------------
+
+      - name: Collect new OpenAlex paper metadata
+
         env:
           OPENALEX_API_KEY: ${{ secrets.OPENALEX_API_KEY }}
 
@@ -117,29 +463,79 @@ jobs:
             TARGET=300
           fi
 
-          echo "PAPER_TARGET=$TARGET"
+          echo "NEW_PAPER_TARGET=$TARGET"
 
           python -m pipeline.papers.collector.openalex \
             --target "$TARGET" \
-            --minimum 1
+            --minimum 1 \
+            --pages-per-query 20 \
+            --existing data/state/existing_papers.json
 
 
       # ------------------------------------------------------
-      # 6. Acquire OA sources
+      # 15. Collection statistics
+      # ------------------------------------------------------
+
+      - name: Show OpenAlex collection statistics
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path(
+              "data/raw/papers/collection_report.json"
+          )
+
+          if not path.is_file():
+              raise SystemExit(
+                  "collection_report.json "
+                  "was not created"
+              )
+
+          report = json.loads(
+              path.read_text(
+                  encoding="utf-8"
+              )
+          )
+
+          keys = [
+              "existing_snapshot_count",
+              "raw_results",
+              "relevant_results_before_existing_filter",
+              "existing_filtered",
+              "unique_new_candidates",
+              "selected_count",
+              "new_target",
+              "new_target_met",
+              "cached_pages",
+              "fetched_pages",
+          ]
+
+          for key in keys:
+              print(
+                  f"{key.upper()}="
+                  f"{report.get(key)}"
+              )
+
+          print(
+              "EXISTING_MATCH_REASONS="
+              + json.dumps(
+                  report.get(
+                      "existing_match_reasons",
+                      {},
+                  ),
+                  ensure_ascii=True,
+                  sort_keys=True,
+              )
+          )
+          PY
+
+
+      # ------------------------------------------------------
+      # 16. OA documents
       #
-      # 중요
-      #
-      # 이제 continue-on-error를 사용하지 않는다.
-      #
-      # download.py 내부에서:
-      #
-      # 개별 논문 다운로드 실패
-      # → 재시도
-      # → unavailable 처리
-      # → 다음 논문 계속
-      #
-      # 전체 source 확보가 0건인 경우에만
-      # download.py가 exit 1을 반환한다.
+      # download.py 내부에서 개별 실패는
+      # retry → unavailable → 다음 논문 계속.
       # ------------------------------------------------------
 
       - name: Acquire accessible OA source documents
@@ -148,18 +544,17 @@ jobs:
 
 
       # ------------------------------------------------------
-      # 7. Inspect download report
+      # 17. Download report
       # ------------------------------------------------------
 
       - name: Inspect paper download report
         run: |
-          echo "========================================"
-          echo "Paper download report"
-          echo "========================================"
-
           if [ ! -f "data/raw/papers/download_report.json" ]; then
+
             echo "download_report.json was not created."
+
             exit 1
+
           fi
 
           python -m json.tool \
@@ -168,10 +563,7 @@ jobs:
 
 
       # ------------------------------------------------------
-      # 8. Print download statistics
-      #
-      # documents 전체 내용을 출력하지 않고
-      # 핵심 카운트만 Actions 로그에 출력한다.
+      # 18. Acquisition stats
       # ------------------------------------------------------
 
       - name: Show paper acquisition statistics
@@ -190,89 +582,24 @@ jobs:
               )
           )
 
-          print(
-              "SELECTED_COUNT="
-              + str(
-                  report.get(
-                      "selected_count",
-                      0,
-                  )
+          for key in (
+              "selected_count",
+              "downloaded_pdf",
+              "downloaded_html",
+              "downloaded_total",
+              "unavailable",
+              "cache_hits",
+              "worker_exceptions",
+          ):
+              print(
+                  f"{key.upper()}="
+                  f"{report.get(key, 0)}"
               )
-          )
-
-          print(
-              "DOWNLOADED_PDF="
-              + str(
-                  report.get(
-                      "downloaded_pdf",
-                      0,
-                  )
-              )
-          )
-
-          print(
-              "DOWNLOADED_HTML="
-              + str(
-                  report.get(
-                      "downloaded_html",
-                      0,
-                  )
-              )
-          )
-
-          print(
-              "DOWNLOADED_TOTAL="
-              + str(
-                  report.get(
-                      "downloaded_total",
-                      0,
-                  )
-              )
-          )
-
-          print(
-              "UNAVAILABLE="
-              + str(
-                  report.get(
-                      "unavailable",
-                      0,
-                  )
-              )
-          )
-
-          print(
-              "CACHE_HITS="
-              + str(
-                  report.get(
-                      "cache_hits",
-                      0,
-                  )
-              )
-          )
-
-          print(
-              "WORKER_EXCEPTIONS="
-              + str(
-                  report.get(
-                      "worker_exceptions",
-                      0,
-                  )
-              )
-          )
           PY
 
 
       # ------------------------------------------------------
-      # 9. Extract / clean / quality assessment
-      #
-      # 여기서 실제 논문 품질을 검사한다.
-      #
-      # 예:
-      #
-      # minimum = 50
-      #
-      # 영어 + 구조 + 본문 품질을 만족하는 논문이
-      # 최소 기준 이상이어야 다음으로 진행한다.
+      # 19. Extract / clean / quality
       # ------------------------------------------------------
 
       - name: Extract and assess paper sections
@@ -290,7 +617,7 @@ jobs:
 
 
       # ------------------------------------------------------
-      # 10. Entity Resolution
+      # 20. Entity Resolution
       # ------------------------------------------------------
 
       - name: Resolve paper entities
@@ -300,18 +627,17 @@ jobs:
 
 
       # ------------------------------------------------------
-      # 11. Inspect processed output
+      # 21. Inspect processed output
       # ------------------------------------------------------
 
       - name: Inspect processed paper outputs
         run: |
-          echo "========================================"
-          echo "Processed paper outputs"
-          echo "========================================"
-
           if [ ! -d "data/processed/papers" ]; then
+
             echo "data/processed/papers does not exist."
+
             exit 1
+
           fi
 
           find data/processed/papers \
@@ -322,7 +648,7 @@ jobs:
 
 
       # ------------------------------------------------------
-      # 12. Validate processed result exists
+      # 22. Validate processing output
       # ------------------------------------------------------
 
       - name: Validate paper processing output
@@ -336,38 +662,35 @@ jobs:
 
           if not root.exists():
               raise SystemExit(
-                  "Processed paper directory does not exist."
+                  "Processed paper directory "
+                  "does not exist"
               )
 
           json_files = list(
-              root.rglob("*.json")
+              root.rglob(
+                  "*.json"
+              )
           )
 
           if not json_files:
               raise SystemExit(
-                  "No processed JSON files were created."
+                  "No processed JSON files "
+                  "were created"
               )
 
           print(
               "PROCESSED_JSON_COUNT="
               + str(
-                  len(json_files)
+                  len(
+                      json_files
+                  )
               )
           )
-
-          for path in sorted(json_files):
-              print(path)
           PY
 
 
       # ------------------------------------------------------
-      # 13. Upload DB transfer artifact
-      #
-      # GitHub Hosted Runner
-      #       ↓
-      # Artifact
-      #       ↓
-      # EC2 Self Hosted Runner
+      # 23. Transfer to EC2
       # ------------------------------------------------------
 
       - name: Upload papers for PostgreSQL load
@@ -389,10 +712,10 @@ jobs:
   # ==========================================================
   # JOB 2
   #
-  # EC2 Self Hosted Runner
+  # EC2 Self-hosted Runner
   #
-  # Artifact
-  #    ↓
+  # Processed papers
+  #   ↓
   # PostgreSQL
   # ==========================================================
 
@@ -418,27 +741,29 @@ jobs:
     steps:
 
       # ------------------------------------------------------
-      # 14. Checkout
+      # 24. Checkout
       # ------------------------------------------------------
 
       - name: Checkout repository
         uses: actions/checkout@v4
+
         with:
           ref: main
 
 
       # ------------------------------------------------------
-      # 15. Python
+      # 25. Python
       # ------------------------------------------------------
 
       - name: Setup Python
         uses: actions/setup-python@v5
+
         with:
           python-version: '3.12'
 
 
       # ------------------------------------------------------
-      # 16. Dependencies
+      # 26. Dependencies
       # ------------------------------------------------------
 
       - name: Install pipeline dependencies
@@ -448,7 +773,7 @@ jobs:
 
 
       # ------------------------------------------------------
-      # 17. Download artifact
+      # 27. Download processed papers
       # ------------------------------------------------------
 
       - name: Download processed paper artifact
@@ -461,24 +786,19 @@ jobs:
 
 
       # ------------------------------------------------------
-      # 18. Verify transferred files
+      # 28. Verify transfer
       # ------------------------------------------------------
 
       - name: Verify transferred paper data
         run: |
-          echo "========================================"
-          echo "EC2 runner"
-          echo "========================================"
-
           hostname
 
-          echo "========================================"
-          echo "Transferred paper files"
-          echo "========================================"
-
           if [ ! -d "data/processed/papers" ]; then
+
             echo "Processed paper directory was not transferred."
+
             exit 1
+
           fi
 
           find data/processed/papers \
@@ -489,9 +809,7 @@ jobs:
 
 
       # ------------------------------------------------------
-      # 19. Validate PostgreSQL configuration
-      #
-      # 값 자체는 절대 출력하지 않는다.
+      # 29. PostgreSQL config
       # ------------------------------------------------------
 
       - name: Validate PostgreSQL configuration
@@ -530,7 +848,7 @@ jobs:
 
 
       # ------------------------------------------------------
-      # 20. PostgreSQL TCP test
+      # 30. PostgreSQL TCP
       # ------------------------------------------------------
 
       - name: Test PostgreSQL connectivity
@@ -546,18 +864,6 @@ jobs:
                   "POSTGRES_PORT",
                   "5432",
               ).strip()
-          )
-
-          print(
-              "Testing PostgreSQL connectivity..."
-          )
-
-          print(
-              f"Target host: {host}"
-          )
-
-          print(
-              f"Target port: {port}"
           )
 
           try:
@@ -605,15 +911,11 @@ jobs:
 
 
       # ------------------------------------------------------
-      # 21. PostgreSQL Loader
+      # 31. Load papers
       #
-      # 기존 paper loader를 그대로 사용한다.
-      #
-      # DB:
-      # 127.0.0.1
-      #
-      # 즉 GitHub Hosted Runner에서 공인 PostgreSQL 포트를
-      # 접근하지 않는다.
+      # 여기서 기존 loader가 다시:
+      # DOI / source_url / content_hash
+      # 중복 검사를 수행한다.
       # ------------------------------------------------------
 
       - name: Load processed papers into PostgreSQL
@@ -624,7 +926,7 @@ jobs:
 
 
       # ------------------------------------------------------
-      # 22. Print load report
+      # 32. Load report
       # ------------------------------------------------------
 
       - name: Show PostgreSQL paper load report
@@ -632,10 +934,6 @@ jobs:
 
         run: |
           if [ -f "data/processed/papers/load_report.json" ]; then
-
-            echo "========================================"
-            echo "PostgreSQL paper load report"
-            echo "========================================"
 
             python -m json.tool \
               data/processed/papers/load_report.json
@@ -648,7 +946,7 @@ jobs:
 
 
       # ------------------------------------------------------
-      # 23. Preserve final artifacts
+      # 33. Final artifact
       # ------------------------------------------------------
 
       - name: Preserve paper ingestion artifacts

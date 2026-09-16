@@ -1,8 +1,14 @@
-"""Collect traceable K-pop paper metadata; never invent missing paper sections."""
+"""Collect traceable K-pop paper metadata; never invent missing paper sections.
+
+When --existing is provided, papers already stored in PostgreSQL are filtered
+before final selection. The collector then paginates deeper until it has enough
+new unique candidates or reaches the configured page limit.
+"""
 
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -16,55 +22,31 @@ from urllib.parse import unquote, urlsplit
 
 from pipeline.common.http import FetchError, get_json
 
-
 LOG = logging.getLogger(__name__)
-
 CONFIG = Path(__file__).with_name("config.json")
 
 CORE = re.compile(
-    r"\bk[\s\-–]?pop\b|"
-    r"\bkorean (?:pop|wave)\b|"
-    r"\bhallyu\b|"
-    r"케이팝|"
-    r"한류",
+    r"\bk[\s\-–]?pop\b|\bkorean (?:pop|wave)\b|\bhallyu\b|케이팝|한류",
     re.I,
 )
 
 CONTEXT = {
-    "fandom": (
-        r"fan(?:dom|s|ning)?\b|"
-        r"팬덤|"
-        r"팬\s"
-    ),
+    "fandom": r"fan(?:dom|s|ning)?\b|팬덤|팬\s",
     "social_media": (
-        r"social media|"
-        r"sns\b|"
-        r"tiktok|"
-        r"youtube|"
-        r"twitter|"
-        r"instagram|"
-        r"소셜|"
-        r"소셜미디어"
+        r"social media|sns\b|tiktok|youtube|twitter|instagram|소셜|소셜미디어"
     ),
     "diffusion": (
-        r"global|"
-        r"transnational|"
-        r"international|"
-        r"diffusion|"
-        r"circulation|"
-        r"해외|"
-        r"세계|"
-        r"글로벌"
+        r"global|transnational|international|diffusion|circulation|해외|세계|글로벌"
     ),
     "participation": (
-        r"participat|"
-        r"communit|"
-        r"activit|"
-        r"consum|"
-        r"팬활동|"
-        r"커뮤니티"
+        r"participat|communit|activit|consum|팬활동|커뮤니티"
     ),
 }
+
+OPENALEX_WORK_ID = re.compile(
+    r"(?:https?://)?openalex\.org/(W\d+)",
+    re.I,
+)
 
 
 def write_json(
@@ -129,6 +111,200 @@ def normalize_doi(
     )
 
 
+def normalize_source_url(
+    url: str | None,
+) -> str | None:
+    value = (
+        url or ""
+    ).strip()
+
+    if not value:
+        return None
+
+    parsed = urlsplit(
+        value
+    )
+
+    if (
+        parsed.scheme not in {
+            "http",
+            "https",
+        }
+        or not parsed.hostname
+    ):
+        return None
+
+    return value
+
+
+def openalex_id_from_value(
+    value: str | None,
+) -> str | None:
+    if not value:
+        return None
+
+    match = OPENALEX_WORK_ID.search(
+        value.strip()
+    )
+
+    return (
+        match.group(1).upper()
+        if match
+        else None
+    )
+
+
+def load_existing_index(
+    path: Path | None,
+) -> tuple[
+    dict[str, set[str]],
+    int,
+]:
+    """
+    PostgreSQL snapshot을 읽어서
+    OpenAlex 수집 전 중복 제거용 index를 만든다.
+    """
+
+    index = {
+        "dois": set(),
+        "source_urls": set(),
+        "openalex_ids": set(),
+    }
+
+    if path is None:
+        return index, 0
+
+    payload = json.loads(
+        path.read_text(
+            encoding="utf-8"
+        )
+    )
+
+    papers = payload.get(
+        "papers"
+    )
+
+    if not isinstance(
+        papers,
+        list,
+    ):
+        raise ValueError(
+            "Existing paper snapshot "
+            "must contain a papers list"
+        )
+
+    for paper in papers:
+        if not isinstance(
+            paper,
+            dict,
+        ):
+            continue
+
+        doi = normalize_doi(
+            paper.get("doi")
+        )
+
+        if doi:
+            index[
+                "dois"
+            ].add(doi)
+
+        source_url = (
+            normalize_source_url(
+                paper.get(
+                    "source_url"
+                )
+            )
+        )
+
+        if source_url:
+            index[
+                "source_urls"
+            ].add(source_url)
+
+            work_id = (
+                openalex_id_from_value(
+                    source_url
+                )
+            )
+
+            if work_id:
+                index[
+                    "openalex_ids"
+                ].add(work_id)
+
+        explicit_id = (
+            openalex_id_from_value(
+                paper.get(
+                    "openalex_id"
+                )
+            )
+        )
+
+        if explicit_id:
+            index[
+                "openalex_ids"
+            ].add(explicit_id)
+
+    return (
+        index,
+        len(papers),
+    )
+
+
+def existing_match_reason(
+    record: dict,
+    index: dict[
+        str,
+        set[str],
+    ],
+) -> str | None:
+    """
+    이미 PostgreSQL에 있는 논문이면
+    어떤 식별자로 매칭됐는지 반환한다.
+    """
+
+    doi = normalize_doi(
+        record.get("doi")
+    )
+
+    if (
+        doi
+        and doi
+        in index["dois"]
+    ):
+        return "doi"
+
+    source_url = (
+        normalize_source_url(
+            record.get(
+                "source_url"
+            )
+        )
+    )
+
+    if (
+        source_url
+        and source_url
+        in index["source_urls"]
+    ):
+        return "source_url"
+
+    work_id = str(
+        record.get("id")
+        or ""
+    ).upper()
+
+    if (
+        work_id
+        and work_id
+        in index["openalex_ids"]
+    ):
+        return "openalex_id"
+
+    return None
+
+
 def abstract_text(
     index: dict | None,
 ) -> str | None:
@@ -139,12 +315,15 @@ def abstract_text(
 
     for word, offsets in index.items():
         for position in offsets:
-            positions[int(position)] = word
+            positions[
+                int(position)
+            ] = word
 
     return (
         " ".join(
             positions[k]
-            for k in sorted(positions)
+            for k
+            in sorted(positions)
         )
         or None
     )
@@ -153,14 +332,19 @@ def abstract_text(
 def relevant(
     title: str,
     abstract: str | None,
-) -> tuple[int, list[str]]:
+) -> tuple[
+    int,
+    list[str],
+]:
     combined = (
         title
         + " "
         + (abstract or "")
     )
 
-    if not CORE.search(combined):
+    if not CORE.search(
+        combined
+    ):
         return 0, []
 
     matches = [
@@ -180,7 +364,9 @@ def relevant(
     score = (
         5
         * bool(
-            CORE.search(title)
+            CORE.search(
+                title
+            )
         )
         + len(matches)
     )
@@ -197,7 +383,10 @@ def relevant(
         in CONTEXT.values()
     )
 
-    return score, matches
+    return (
+        score,
+        matches,
+    )
 
 
 def normalize_work(
@@ -223,11 +412,15 @@ def normalize_work(
     if (
         not title
         or not score
-        or work.get("is_retracted")
+        or work.get(
+            "is_retracted"
+        )
     ):
         return None
 
-    if work.get("type") != "article":
+    if work.get(
+        "type"
+    ) != "article":
         return None
 
     year = work.get(
@@ -235,7 +428,10 @@ def normalize_work(
     )
 
     if (
-        not isinstance(year, int)
+        not isinstance(
+            year,
+            int,
+        )
         or year
         > datetime.now(
             timezone.utc
@@ -249,7 +445,7 @@ def normalize_work(
     )
 
     if not re.fullmatch(
-        r"https://openalex.org/W\d+",
+        r"https://openalex\.org/W\d+",
         work_id,
     ):
         return None
@@ -258,32 +454,28 @@ def normalize_work(
         work.get("doi")
     )
 
-    locations = (
-        work.get("locations")
-        or []
-    )
-
-    best = (
+    locations = [
         work.get(
             "best_oa_location"
         )
-        or {}
-    )
-
-    locations = [
-        best,
-        *locations,
+        or {},
+        *(
+            work.get(
+                "locations"
+            )
+            or []
+        ),
     ]
 
     sources = []
     seen = set()
 
     for location in locations:
-        if not location:
-            continue
-
-        if not location.get(
-            "is_oa"
+        if (
+            not location
+            or not location.get(
+                "is_oa"
+            )
         ):
             continue
 
@@ -295,14 +487,16 @@ def normalize_work(
                 kind
             )
 
-            if not url:
-                continue
-
-            if url in seen:
+            if (
+                not url
+                or url in seen
+            ):
                 continue
 
             if (
-                urlsplit(url).scheme
+                urlsplit(
+                    url
+                ).scheme
                 not in {
                     "http",
                     "https",
@@ -329,44 +523,45 @@ def normalize_work(
                 }
             )
 
-    authors = []
-
-    for authorship in (
-        work.get("authorships")
-        or []
-    ):
-        author = (
-            authorship.get("author")
+    authors = [
+        (
+            authorship.get(
+                "author"
+            )
             or {}
+        ).get(
+            "display_name"
         )
-
-        display_name = (
-            author.get(
-                "display_name"
+        for authorship
+        in (
+            work.get(
+                "authorships"
             )
+            or []
         )
+    ]
 
-        if display_name:
-            authors.append(
-                display_name
-            )
+    authors = [
+        author
+        for author in authors
+        if author
+    ]
 
-    keywords = []
-
-    for keyword in (
-        work.get("keywords")
-        or []
-    ):
-        display_name = (
-            keyword.get(
-                "display_name"
-            )
+    keywords = [
+        keyword.get(
+            "display_name"
         )
-
-        if display_name:
-            keywords.append(
-                display_name
+        for keyword
+        in (
+            work.get(
+                "keywords"
             )
+            or []
+        )
+        if keyword.get(
+            "display_name"
+        )
+    ]
 
     return {
         "id": (
@@ -375,37 +570,65 @@ def normalize_work(
                 1,
             )[-1]
         ),
-        "title": title,
-        "authors": authors,
-        "published_year": year,
-        "abstract": abstract,
-        "introduction": None,
-        "body": None,
-        "conclusion": None,
-        "keywords": keywords,
-        "source": "OpenAlex",
+
+        "title":
+            title,
+
+        "authors":
+            authors,
+
+        "published_year":
+            year,
+
+        "abstract":
+            abstract,
+
+        "introduction":
+            None,
+
+        "body":
+            None,
+
+        "conclusion":
+            None,
+
+        "keywords":
+            keywords,
+
+        "source":
+            "OpenAlex",
+
         "source_url": (
             "https://doi.org/"
             + doi
             if doi
             else work_id
         ),
-        "metadata_url": work_id,
-        "doi": doi,
-        "language": work.get(
-            "language"
-        ),
-        "is_oa": bool(
-            (
-                work.get(
-                    "open_access"
+
+        "metadata_url":
+            work_id,
+
+        "doi":
+            doi,
+
+        "language":
+            work.get(
+                "language"
+            ),
+
+        "is_oa":
+            bool(
+                (
+                    work.get(
+                        "open_access"
+                    )
+                    or {}
+                ).get(
+                    "is_oa"
                 )
-                or {}
-            ).get(
-                "is_oa"
-            )
-        ),
-        "oa_status": (
+            ),
+
+        "oa_status":
             (
                 work.get(
                     "open_access"
@@ -413,20 +636,26 @@ def normalize_work(
                 or {}
             ).get(
                 "oa_status"
-            )
-        ),
-        "source_locations": sources,
-        "matched_topics": matches,
-        "relevance_score": score,
+            ),
+
+        "source_locations":
+            sources,
+
+        "matched_topics":
+            matches,
+
+        "relevance_score":
+            score,
+
         "matched_queries": [
             query
         ],
-        "fulltext_status": (
-            "not_acquired"
-        ),
-        "section_status": (
-            "not_extracted"
-        ),
+
+        "fulltext_status":
+            "not_acquired",
+
+        "section_status":
+            "not_extracted",
     }
 
 
@@ -436,14 +665,16 @@ def select_unique(
 ) -> list[dict]:
     ranked = sorted(
         records,
-        key=lambda r: (
+        key=lambda record: (
             -int(
-                r["is_oa"]
+                record[
+                    "is_oa"
+                ]
             ),
-            -r[
+            -record[
                 "relevance_score"
             ],
-            r["id"],
+            record["id"],
         ),
     )
 
@@ -474,9 +705,9 @@ def select_unique(
 
         previous = next(
             (
-                identifiers[k]
-                for k in keys
-                if k
+                identifiers[key]
+                for key in keys
+                if key
                 in identifiers
             ),
             None,
@@ -510,22 +741,17 @@ def select_unique(
 
             existing[
                 "source_locations"
-            ] = (
-                existing[
+            ] += [
+                location
+                for location
+                in record[
                     "source_locations"
                 ]
-                + [
-                    location
-                    for location
-                    in record[
-                        "source_locations"
-                    ]
-                    if location[
-                        "url"
-                    ]
-                    not in known_urls
+                if location[
+                    "url"
                 ]
-            )
+                not in known_urls
+            ]
 
             if (
                 record["id"]
@@ -562,15 +788,138 @@ def select_unique(
         result.append(
             {
                 **record,
-                "source_locations": list(
-                    record[
-                        "source_locations"
-                    ]
-                ),
+                "source_locations":
+                    list(
+                        record[
+                            "source_locations"
+                        ]
+                    ),
             }
         )
 
     return result[:target]
+
+
+def fetch_openalex_page(
+    *,
+    query: str,
+    cursor: str,
+    config: dict,
+    output: Path,
+    api_key: str,
+    refresh: bool,
+) -> tuple[
+    dict,
+    Path,
+    bool,
+]:
+    base_params = {
+        "search": query,
+
+        "filter": (
+            "type:article,"
+            "is_retracted:false"
+        ),
+
+        "per_page":
+            config[
+                "page_size"
+            ],
+
+        "cursor":
+            cursor,
+    }
+
+    if config[
+        "open_access_only"
+    ]:
+        base_params[
+            "filter"
+        ] += ",is_oa:true"
+
+    cache_id = (
+        hashlib.sha256(
+            json.dumps(
+                base_params,
+                sort_keys=True,
+            ).encode()
+        )
+        .hexdigest()[:24]
+    )
+
+    cache = (
+        output
+        / "api"
+        / (
+            cache_id
+            + ".json"
+        )
+    )
+
+    if (
+        cache.exists()
+        and not refresh
+    ):
+        response = json.loads(
+            cache.read_text(
+                encoding="utf-8"
+            )
+        )
+
+        fetched = False
+
+    else:
+        request_params = dict(
+            base_params
+        )
+
+        if api_key:
+            request_params[
+                "api_key"
+            ] = api_key
+
+        response = get_json(
+            "https://api.openalex.org/works",
+            request_params,
+            headers={},
+        )
+
+        if not isinstance(
+            response.get(
+                "results"
+            ),
+            list,
+        ):
+            raise FetchError(
+                "OpenAlex response "
+                "is missing results"
+            )
+
+        write_json(
+            cache,
+            response,
+        )
+
+        fetched = True
+
+        time.sleep(1)
+
+    if not isinstance(
+        response.get(
+            "results"
+        ),
+        list,
+    ):
+        raise FetchError(
+            "OpenAlex response "
+            "is missing results"
+        )
+
+    return (
+        response,
+        cache,
+        fetched,
+    )
 
 
 def collect(
@@ -578,6 +927,7 @@ def collect(
     output: Path,
     *,
     refresh: bool = False,
+    existing: Path | None = None,
 ) -> dict:
     output.mkdir(
         parents=True,
@@ -591,11 +941,49 @@ def collect(
     cached_pages = 0
     fetched_pages = 0
 
-    # GitHub Secret 값의 공백/개행 제거
+    relevant_before_existing_filter = 0
+    existing_filtered = 0
+
+    match_reasons: Counter[
+        str
+    ] = Counter()
+
+    (
+        existing_index,
+        existing_snapshot_count,
+    ) = load_existing_index(
+        existing
+    )
+
+    LOG.info(
+        "Existing snapshot: "
+        "papers=%s "
+        "doi=%s "
+        "source_url=%s "
+        "openalex_id=%s",
+
+        existing_snapshot_count,
+        len(
+            existing_index[
+                "dois"
+            ]
+        ),
+        len(
+            existing_index[
+                "source_urls"
+            ]
+        ),
+        len(
+            existing_index[
+                "openalex_ids"
+            ]
+        ),
+    )
+
     api_key = (
         os.getenv(
             "OPENALEX_API_KEY",
-            ""
+            "",
         )
         .strip()
     )
@@ -604,116 +992,93 @@ def collect(
         LOG.info(
             "OpenAlex API key configured."
         )
+
     else:
         LOG.warning(
-            "OPENALEX_API_KEY is not configured."
+            "OPENALEX_API_KEY "
+            "is not configured."
         )
 
-    for query in config["queries"]:
-        cursor = "*"
+    states = [
+        {
+            "query":
+                query,
 
-        for page in range(
-            config[
-                "pages_per_query"
-            ]
-        ):
-            # 캐시 식별용 파라미터.
-            # API key는 캐시에 포함하지 않는다.
-            base_params = {
-                "search": query,
-                "filter": (
-                    "type:article,"
-                    "is_retracted:false"
-                ),
-                "per_page": (
-                    config[
-                        "page_size"
-                    ]
-                ),
-                "cursor": cursor,
-            }
+            "cursor":
+                "*",
 
-            if config[
-                "open_access_only"
+            "active":
+                True,
+
+            "pages":
+                0,
+        }
+        for query
+        in config["queries"]
+    ]
+
+    target = config[
+        "target"
+    ]
+
+    page_limit = config[
+        "pages_per_query"
+    ]
+
+    # Query 1의 결과만 잔뜩 뽑히지 않도록
+    # query별로 1페이지씩 round-robin 방식으로 진행한다.
+    for round_number in range(
+        1,
+        page_limit + 1,
+    ):
+        fetched_any = False
+
+        for state in states:
+            if not state[
+                "active"
             ]:
-                base_params[
-                    "filter"
-                ] += ",is_oa:true"
+                continue
 
-            cache_id = (
-                hashlib.sha256(
-                    json.dumps(
-                        base_params,
-                        sort_keys=True,
-                    ).encode()
-                )
-                .hexdigest()[:24]
-            )
+            query = state[
+                "query"
+            ]
 
-            cache = (
-                output
-                / "api"
-                / (
-                    cache_id
-                    + ".json"
-                )
+            cursor = state[
+                "cursor"
+            ]
+
+            page_number = (
+                state["pages"]
+                + 1
             )
 
             try:
-                if (
-                    cache.exists()
-                    and not refresh
-                ):
-                    response = (
-                        json.loads(
-                            cache.read_text(
-                                encoding=(
-                                    "utf-8"
-                                )
-                            )
-                        )
-                    )
+                (
+                    response,
+                    cache,
+                    fetched,
+                ) = fetch_openalex_page(
+                    query=query,
+                    cursor=cursor,
+                    config=config,
+                    output=output,
+                    api_key=api_key,
+                    refresh=refresh,
+                )
 
-                    cached_pages += 1
+                fetched_any = True
 
-                else:
-                    # 실제 API 요청용 파라미터.
-                    request_params = dict(
-                        base_params
-                    )
+                state[
+                    "pages"
+                ] = page_number
 
-                    # Authorization header 대신
-                    # OpenAlex api_key query parameter 사용.
-                    if api_key:
-                        request_params[
-                            "api_key"
-                        ] = api_key
+                fetched_pages += int(
+                    fetched
+                )
 
-                    response = get_json(
-                        "https://api.openalex.org/works",
-                        request_params,
-                        headers={},
-                    )
-
-                    if not isinstance(
-                        response.get(
-                            "results"
-                        ),
-                        list,
-                    ):
-                        raise FetchError(
-                            "OpenAlex response "
-                            "is missing results"
-                        )
-
-                    write_json(
-                        cache,
-                        response,
-                    )
-
-                    fetched_pages += 1
-
-                    time.sleep(1)
+                cached_pages += int(
+                    not fetched
+                )
 
                 works = response[
                     "results"
@@ -724,40 +1089,65 @@ def collect(
                 )
 
                 for work in works:
-                    record = normalize_work(
-                        work,
-                        query,
+                    record = (
+                        normalize_work(
+                            work,
+                            query,
+                        )
                     )
 
-                    if (
-                        record
-                        and (
-                            not config[
-                                "open_access_only"
-                            ]
-                            or record[
-                                "is_oa"
-                            ]
-                        )
-                    ):
-                        record[
-                            "raw_metadata_path"
-                        ] = (
-                            cache.relative_to(
-                                output
-                            )
-                            .as_posix()
-                        )
+                    if not record:
+                        continue
 
-                        records.append(
-                            record
+                    if (
+                        config[
+                            "open_access_only"
+                        ]
+                        and not record[
+                            "is_oa"
+                        ]
+                    ):
+                        continue
+
+                    relevant_before_existing_filter += 1
+
+                    reason = (
+                        existing_match_reason(
+                            record,
+                            existing_index,
                         )
+                    )
+
+                    if reason:
+                        existing_filtered += 1
+
+                        match_reasons[
+                            reason
+                        ] += 1
+
+                        continue
+
+                    record[
+                        "raw_metadata_path"
+                    ] = (
+                        cache.relative_to(
+                            output
+                        )
+                        .as_posix()
+                    )
+
+                    records.append(
+                        record
+                    )
 
                 LOG.info(
-                    "Query %r page %s: %s results",
+                    "Query %r page %s: "
+                    "raw=%s accumulated_new=%s",
+
                     query,
-                    page + 1,
+                    page_number,
                     len(works),
+                    len(records),
                 )
 
                 next_cursor = (
@@ -778,9 +1168,14 @@ def collect(
                     or next_cursor
                     == cursor
                 ):
-                    break
+                    state[
+                        "active"
+                    ] = False
 
-                cursor = next_cursor
+                else:
+                    state[
+                        "cursor"
+                    ] = next_cursor
 
             except (
                 FetchError,
@@ -790,28 +1185,68 @@ def collect(
             ) as exc:
                 errors.append(
                     {
-                        "query": query,
-                        "page": (
-                            page + 1
-                        ),
-                        "error": str(
-                            exc
-                        ),
+                        "query":
+                            query,
+
+                        "page":
+                            page_number,
+
+                        "error":
+                            str(exc),
                     }
                 )
 
                 LOG.error(
-                    "Query failed %r: %s",
+                    "Query failed "
+                    "%r page %s: %s",
+
                     query,
+                    page_number,
                     exc,
                 )
 
-                break
+                state[
+                    "active"
+                ] = False
 
-    selected = select_unique(
-        records,
-        config["target"],
-    )
+        unique_candidates = (
+            select_unique(
+                records,
+                len(records),
+            )
+        )
+
+        LOG.info(
+            "Round %s complete: "
+            "unique new candidates=%s "
+            "target=%s",
+
+            round_number,
+            len(
+                unique_candidates
+            ),
+            target,
+        )
+
+        # 모든 query가 같은 depth까지 간 다음
+        # 신규 목표 개수를 채웠으면 종료한다.
+        if (
+            len(
+                unique_candidates
+            )
+            >= target
+        ):
+            break
+
+        if (
+            not fetched_any
+            or not any(
+                state["active"]
+                for state
+                in states
+            )
+        ):
+            break
 
     unique_candidates = (
         select_unique(
@@ -820,63 +1255,121 @@ def collect(
         )
     )
 
+    selected = (
+        unique_candidates[
+            :target
+        ]
+    )
+
     report = {
-        "schema_version": 1,
-        "collected_at": (
+        "schema_version":
+            2,
+
+        "collected_at":
             datetime.now(
                 timezone.utc
-            ).isoformat()
-        ),
-        "config": config,
-        "raw_results": raw_count,
-        "relevant_results_before_dedup": (
-            len(records)
-        ),
-        "unique_candidates": (
+            ).isoformat(),
+
+        "config":
+            config,
+
+        "existing_snapshot_count":
+            existing_snapshot_count,
+
+        "raw_results":
+            raw_count,
+
+        "relevant_results_before_existing_filter":
+            relevant_before_existing_filter,
+
+        "existing_filtered":
+            existing_filtered,
+
+        "existing_match_reasons":
+            dict(
+                sorted(
+                    match_reasons.items()
+                )
+            ),
+
+        "relevant_results_before_dedup":
+            len(records),
+
+        "unique_new_candidates":
             len(
                 unique_candidates
-            )
-        ),
-        "selected_count": (
+            ),
+
+        # 기존 로그/테스트와의 호환용
+        "unique_candidates":
+            len(
+                unique_candidates
+            ),
+
+        "selected_count":
+            len(selected),
+
+        "new_target":
+            target,
+
+        "new_target_met":
             len(selected)
-        ),
-        "with_abstract": sum(
-            bool(
-                record[
-                    "abstract"
-                ]
-            )
-            for record
-            in selected
-        ),
-        "with_source_location": sum(
-            bool(
-                record[
-                    "source_locations"
-                ]
-            )
-            for record
-            in selected
-        ),
-        "cached_pages": (
-            cached_pages
-        ),
-        "fetched_pages": (
-            fetched_pages
-        ),
-        "metadata_minimum_met": (
+            >= target,
+
+        "with_abstract":
+            sum(
+                bool(
+                    record[
+                        "abstract"
+                    ]
+                )
+                for record
+                in selected
+            ),
+
+        "with_source_location":
+            sum(
+                bool(
+                    record[
+                        "source_locations"
+                    ]
+                )
+                for record
+                in selected
+            ),
+
+        "cached_pages":
+            cached_pages,
+
+        "fetched_pages":
+            fetched_pages,
+
+        "pages_by_query": {
+            state["query"]:
+                state["pages"]
+            for state
+            in states
+        },
+
+        "metadata_minimum_met":
             len(selected)
             >= config[
                 "minimum"
-            ]
-        ),
-        "fulltext_verified_count": 0,
-        "training_ready_count": 0,
-        "errors": errors,
+            ],
+
+        "fulltext_verified_count":
+            0,
+
+        "training_ready_count":
+            0,
+
+        "errors":
+            errors,
     }
 
     write_json(
-        output / "papers.json",
+        output
+        / "papers.json",
         selected,
     )
 
@@ -919,6 +1412,25 @@ def main() -> int:
     )
 
     parser.add_argument(
+        "--existing",
+        type=Path,
+        help=(
+            "JSON snapshot of papers "
+            "already stored in PostgreSQL"
+        ),
+    )
+
+    parser.add_argument(
+        "--pages-per-query",
+        type=int,
+        help=(
+            "Override maximum "
+            "OpenAlex cursor pages "
+            "searched per query"
+        ),
+    )
+
+    parser.add_argument(
         "--refresh",
         action="store_true",
     )
@@ -934,23 +1446,26 @@ def main() -> int:
     for name in (
         "target",
         "minimum",
+        "pages_per_query",
     ):
-        if (
-            getattr(
-                args,
-                name,
-            )
-            is not None
-        ):
-            config[name] = getattr(
-                args,
-                name,
-            )
+        value = getattr(
+            args,
+            name,
+        )
+
+        if value is not None:
+            config[
+                name
+            ] = value
 
     if not (
         1
-        <= config["minimum"]
-        <= config["target"]
+        <= config[
+            "minimum"
+        ]
+        <= config[
+            "target"
+        ]
         <= 1000
     ):
         parser.error(
@@ -966,8 +1481,8 @@ def main() -> int:
         <= 200
     ):
         parser.error(
-            "page_size must "
-            "be 1..200"
+            "page_size "
+            "must be 1..200"
         )
 
     if not (
@@ -983,7 +1498,9 @@ def main() -> int:
         )
 
     if (
-        not config["queries"]
+        not config[
+            "queries"
+        ]
         or not all(
             isinstance(
                 query,
@@ -1001,6 +1518,16 @@ def main() -> int:
             "search queries"
         )
 
+    if (
+        args.existing
+        is not None
+        and not args.existing.is_file()
+    ):
+        parser.error(
+            "--existing snapshot "
+            "file does not exist"
+        )
+
     args.output.mkdir(
         parents=True,
         exist_ok=True,
@@ -1015,6 +1542,7 @@ def main() -> int:
         ),
         handlers=[
             logging.StreamHandler(),
+
             logging.FileHandler(
                 args.output
                 / "collection.log",
@@ -1023,11 +1551,27 @@ def main() -> int:
         ],
     )
 
-    report = collect(
-        config,
-        args.output,
-        refresh=args.refresh,
-    )
+    try:
+        report = collect(
+            config,
+            args.output,
+            refresh=args.refresh,
+            existing=args.existing,
+        )
+
+    except (
+        OSError,
+        ValueError,
+        json.JSONDecodeError,
+    ) as exc:
+        LOG.error(
+            "Collector "
+            "configuration/state "
+            "failure: %s",
+            type(exc).__name__,
+        )
+
+        return 1
 
     print(
         json.dumps(
