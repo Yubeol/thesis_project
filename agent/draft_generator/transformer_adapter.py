@@ -2,29 +2,54 @@ import os
 
 from dotenv import load_dotenv
 
+from agent.draft_generator.generator import (
+    generate_transformer_draft as call_transformer,
+)
+
 load_dotenv()
 
 
-def build_evidence_text(
-    retrieval: dict,
-) -> str:
+def _clean(value) -> str:
     """
-    Hybrid RAG 결과를 Transformer가 받을
-    하나의 Evidence 텍스트로 변환한다.
+    RAG 결과의 문자열 값을 안전하게 정리한다.
     """
 
-    sections = []
+    if value is None:
+        return ""
 
-    # -----------------------------------------
-    # Papers
-    # -----------------------------------------
-
-    papers = retrieval.get("papers", [])
-
-    for index, paper in enumerate(
-        papers,
-        start=1,
+    if isinstance(
+        value,
+        (list, tuple),
     ):
+        return ", ".join(
+            str(item).strip()
+            for item in value
+            if str(item).strip()
+        )
+
+    return str(
+        value
+    ).strip()
+
+
+def build_paper_evidence(
+    retrieval: dict,
+) -> list[str]:
+    """
+    Hybrid RAG의 논문 검색 결과를
+    Transformer paper_evidence 형식으로 변환한다.
+
+    논문 한 편을 evidence item 하나로 구성한다.
+    """
+
+    results: list[str] = []
+
+    papers = retrieval.get(
+        "papers",
+        [],
+    )
+
+    for paper in papers:
         chunks = paper.get(
             "evidence_chunks",
             [],
@@ -33,79 +58,217 @@ def build_evidence_text(
         if not chunks:
             continue
 
-        sections.append(
-            f"[Paper {index}]"
+        parts: list[str] = []
+
+        title = _clean(
+            paper.get(
+                "title"
+            )
         )
 
-        sections.append(
-            f"Title: {paper.get('title', '')}"
+        authors = _clean(
+            paper.get(
+                "authors"
+            )
         )
 
-        if paper.get("authors"):
-            sections.append(
-                f"Authors: {paper['authors']}"
+        published_year = _clean(
+            paper.get(
+                "published_year"
+            )
+        )
+
+        if title:
+            parts.append(
+                f"Title: {title}"
             )
 
-        if paper.get("published_year"):
-            sections.append(
-                f"Year: {paper['published_year']}"
+        if authors:
+            parts.append(
+                f"Authors: {authors}"
+            )
+
+        if published_year:
+            parts.append(
+                f"Year: {published_year}"
             )
 
         for chunk in chunks:
-            content = chunk.get("content")
+            content = _clean(
+                chunk.get(
+                    "content"
+                )
+            )
 
-            if content:
-                section = chunk.get(
+            if not content:
+                continue
+
+            section = _clean(
+                chunk.get(
                     "section",
                     "unknown",
                 )
+            )
 
-                sections.append(
+            if section:
+                parts.append(
                     f"[{section}] {content}"
                 )
+            else:
+                parts.append(
+                    content
+                )
 
-        sections.append("")
+        if parts:
+            results.append(
+                "\n".join(
+                    parts
+                )
+            )
 
-    # -----------------------------------------
-    # News
-    # -----------------------------------------
+    return results
+
+
+def build_news_evidence(
+    retrieval: dict,
+) -> list[str]:
+    """
+    Hybrid RAG의 뉴스 검색 결과를
+    Transformer news_evidence 형식으로 변환한다.
+    """
+
+    results: list[str] = []
 
     news_results = retrieval.get(
         "news",
         [],
     )
 
-    for index, news in enumerate(
-        news_results,
-        start=1,
-    ):
-        content = news.get("content")
+    for news in news_results:
+        content = _clean(
+            news.get(
+                "content"
+            )
+        )
 
         if not content:
             continue
 
+        title = (
+            _clean(
+                news.get(
+                    "title_en"
+                )
+            )
+            or _clean(
+                news.get(
+                    "title"
+                )
+            )
+        )
+
+        published_at = (
+            _clean(
+                news.get(
+                    "published_at"
+                )
+            )
+            or _clean(
+                news.get(
+                    "published_date"
+                )
+            )
+        )
+
+        parts: list[str] = []
+
+        if title:
+            parts.append(
+                f"Title: {title}"
+            )
+
+        if published_at:
+            parts.append(
+                f"Published: {published_at}"
+            )
+
+        parts.append(
+            content
+        )
+
+        results.append(
+            "\n".join(
+                parts
+            )
+        )
+
+    return results
+
+
+def build_evidence_text(
+    retrieval: dict,
+) -> str:
+    """
+    기존 코드 및 디버깅 호환용.
+
+    실제 Transformer 호출에서는 사용하지 않고
+    paper/news evidence를 별도 리스트로 전달한다.
+    """
+
+    paper_evidence = (
+        build_paper_evidence(
+            retrieval
+        )
+    )
+
+    news_evidence = (
+        build_news_evidence(
+            retrieval
+        )
+    )
+
+    sections: list[str] = []
+
+    for index, evidence in enumerate(
+        paper_evidence,
+        start=1,
+    ):
+        sections.append(
+            f"[Paper {index}]"
+        )
+        sections.append(
+            evidence
+        )
+        sections.append(
+            ""
+        )
+
+    for index, evidence in enumerate(
+        news_evidence,
+        start=1,
+    ):
         sections.append(
             f"[News {index}]"
         )
-
         sections.append(
-            f"Title: "
-            f"{news.get('title_en', '')}"
+            evidence
+        )
+        sections.append(
+            ""
         )
 
-        sections.append(content)
-        sections.append("")
-
-    return "\n".join(sections).strip()
+    return "\n".join(
+        sections
+    ).strip()
 
 
 def _mock_generate_draft(
     title: str,
     topic: str | None,
-    evidence: str,
+    paper_evidence: list[str],
+    news_evidence: list[str],
 ) -> str:
     """
-    Transformer 개발 완료 전
     Agent 연결 테스트용 Mock.
     """
 
@@ -113,8 +276,14 @@ def _mock_generate_draft(
         "[MOCK TRANSFORMER DRAFT]\n\n"
         f"Title: {title}\n"
         f"Topic: {topic or ''}\n\n"
-        "Evidence-based draft placeholder.\n"
-        f"Evidence length: {len(evidence)} characters."
+        "Introduction:\n"
+        "Mock introduction.\n\n"
+        "Body:\n"
+        "Mock body.\n\n"
+        "Conclusion:\n"
+        "Mock conclusion.\n\n"
+        f"Paper evidence items: {len(paper_evidence)}\n"
+        f"News evidence items: {len(news_evidence)}"
     )
 
 
@@ -122,70 +291,60 @@ def generate_transformer_draft(
     title: str,
     topic: str | None,
     retrieval: dict,
+    research_question: str | None = None,
+    instruction: str | None = None,
 ) -> str:
     """
-    Hybrid RAG Evidence를 Transformer에 전달해
-    영문 초안을 생성한다.
+    Hybrid RAG 결과를 Transformer 입력 형식으로 변환한다.
 
-    현재:
-        Mock 사용 가능
-
-    추후:
-        transformer.inference.generate_draft()
-        실제 함수 호출
+    실제 Transformer 모델 호출은
+    agent/draft_generator/generator.py 에서만 수행한다.
     """
 
-    evidence = build_evidence_text(
-        retrieval
+    paper_evidence = (
+        build_paper_evidence(
+            retrieval
+        )
     )
 
-    if not evidence:
+    news_evidence = (
+        build_news_evidence(
+            retrieval
+        )
+    )
+
+    if (
+        not paper_evidence
+        and not news_evidence
+    ):
         raise RuntimeError(
-            "Transformer에 전달할 Evidence가 없습니다."
+            "Transformer에 전달할 "
+            "Paper/News Evidence가 없습니다."
         )
 
     use_mock = (
         os.getenv(
             "TRANSFORMER_USE_MOCK",
-            "true",
-        ).lower()
+            "false",
+        )
+        .strip()
+        .lower()
         == "true"
     )
-
-    # -----------------------------------------
-    # 개발 중 Mock
-    # -----------------------------------------
 
     if use_mock:
         return _mock_generate_draft(
             title=title,
             topic=topic,
-            evidence=evidence,
+            paper_evidence=paper_evidence,
+            news_evidence=news_evidence,
         )
 
-    # -----------------------------------------
-    # 실제 Transformer
-    # -----------------------------------------
-
-    try:
-        from transformer.inference import (
-            generate_draft,
-        )
-    except ImportError as exc:
-        raise RuntimeError(
-            "Transformer inference 모듈을 "
-            "불러올 수 없습니다."
-        ) from exc
-
-    draft = generate_draft(
+    return call_transformer(
         title=title,
         topic=topic,
-        evidence=evidence,
+        research_question=research_question,
+        paper_evidence=paper_evidence,
+        news_evidence=news_evidence,
+        instruction=instruction,
     )
-
-    if not draft:
-        raise RuntimeError(
-            "Transformer 초안 결과가 비어 있습니다."
-        )
-
-    return draft
