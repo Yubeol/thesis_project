@@ -1,0 +1,3 @@
+# Export only. No torch, external LLM, API key, or DB write permission is required.
+psycopg[binary]==3.3.5
+python-dotenv==1.2.3
