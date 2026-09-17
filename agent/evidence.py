@@ -1,0 +1,223 @@
+# agent/evidence.py
+
+from __future__ import annotations
+
+import json
+from datetime import date, datetime
+from typing import Any
+
+
+DEFAULT_MAX_CHARS_PER_ITEM = 5000
+
+
+def _clean_text(value: Any) -> str:
+    if value is None:
+        return ""
+
+    text = str(value)
+    return " ".join(text.split())
+
+
+def _format_authors(value: Any) -> str:
+    """
+    authors가 PostgreSQL에서 JSON 문자열 형태로 넘어오는 경우 처리.
+    예:
+    '["Jingran Liang", "Huizhong Miao"]'
+    """
+    if not value:
+        return ""
+
+    if isinstance(value, list):
+        return ", ".join(str(item) for item in value)
+
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+
+            if isinstance(parsed, list):
+                return ", ".join(str(item) for item in parsed)
+        except json.JSONDecodeError:
+            pass
+
+        return value
+
+    return str(value)
+
+
+def _format_date(value: Any) -> str:
+    if not value:
+        return ""
+
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d")
+
+    if isinstance(value, date):
+        return value.isoformat()
+
+    return str(value)
+
+
+def _truncate(
+    text: str,
+    max_chars: int,
+) -> str:
+    if len(text) <= max_chars:
+        return text
+
+    return text[:max_chars].rstrip() + "..."
+
+
+def format_paper_evidence(
+    papers: list[dict[str, Any]],
+    *,
+    max_chars_per_item: int = DEFAULT_MAX_CHARS_PER_ITEM,
+) -> list[str]:
+    """
+    Paper Vector + Graph RAG 검색 결과를
+    Transformer generate_draft()용 문자열 리스트로 변환한다.
+    """
+
+    results: list[str] = []
+
+    for index, paper in enumerate(papers, start=1):
+        content = _clean_text(paper.get("content"))
+
+        if not content:
+            continue
+
+        content = _truncate(
+            content,
+            max_chars=max_chars_per_item,
+        )
+
+        title = _clean_text(paper.get("title"))
+        authors = _format_authors(paper.get("authors"))
+        year = _clean_text(paper.get("published_year"))
+        source = _clean_text(paper.get("source"))
+        doi = _clean_text(paper.get("doi"))
+
+        similarity = paper.get("similarity")
+
+        lines = [
+            f"[PAPER {index}]",
+            f"Title: {title}",
+        ]
+
+        if authors:
+            lines.append(f"Authors: {authors}")
+
+        if year:
+            lines.append(f"Published Year: {year}")
+
+        if source:
+            lines.append(f"Source: {source}")
+
+        if doi:
+            lines.append(f"DOI: {doi}")
+
+        if isinstance(similarity, (int, float)):
+            lines.append(f"Similarity: {similarity:.4f}")
+
+        lines.extend(
+            [
+                "Evidence:",
+                content,
+            ]
+        )
+
+        results.append("\n".join(lines))
+
+    return results
+
+
+def format_news_evidence(
+    news_items: list[dict[str, Any]],
+    *,
+    max_chars_per_item: int = DEFAULT_MAX_CHARS_PER_ITEM,
+) -> list[str]:
+    """
+    News Vector RAG 검색 결과를
+    Transformer generate_draft()용 문자열 리스트로 변환한다.
+    """
+
+    results: list[str] = []
+
+    for index, news in enumerate(news_items, start=1):
+        content = _clean_text(news.get("content"))
+
+        if not content:
+            continue
+
+        content = _truncate(
+            content,
+            max_chars=max_chars_per_item,
+        )
+
+        title = _clean_text(
+            news.get("title_en")
+            or news.get("title_original")
+            or news.get("title")
+        )
+
+        source = _clean_text(news.get("source"))
+        published_at = _format_date(news.get("published_at"))
+        url = _clean_text(news.get("url"))
+
+        similarity = news.get("similarity")
+
+        lines = [
+            f"[NEWS {index}]",
+            f"Title: {title}",
+        ]
+
+        if source:
+            lines.append(f"Source: {source}")
+
+        if published_at:
+            lines.append(f"Published At: {published_at}")
+
+        if url:
+            lines.append(f"URL: {url}")
+
+        if isinstance(similarity, (int, float)):
+            lines.append(f"Similarity: {similarity:.4f}")
+
+        lines.extend(
+            [
+                "Evidence:",
+                content,
+            ]
+        )
+
+        results.append("\n".join(lines))
+
+    return results
+
+
+def build_evidence_lists(
+    retrieval_result: dict[str, Any],
+    *,
+    max_chars_per_item: int = DEFAULT_MAX_CHARS_PER_ITEM,
+) -> tuple[list[str], list[str]]:
+    """
+    retrieve_hybrid()의 반환값을 받아
+    Transformer 입력 형식으로 한 번에 변환한다.
+
+    returns:
+        (
+            paper_evidence,
+            news_evidence,
+        )
+    """
+
+    paper_evidence = format_paper_evidence(
+        retrieval_result.get("papers", []),
+        max_chars_per_item=max_chars_per_item,
+    )
+
+    news_evidence = format_news_evidence(
+        retrieval_result.get("news", []),
+        max_chars_per_item=max_chars_per_item,
+    )
+
+    return paper_evidence, news_evidence
