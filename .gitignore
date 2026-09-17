@@ -50,3 +50,4 @@ data/training/*.json
 data/training/*.jsonl
 data/training/*.tmp
 artifacts/
+transformer/models/transformer-full/
