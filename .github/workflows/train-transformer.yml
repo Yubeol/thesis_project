@@ -44,9 +44,10 @@ concurrency:
 jobs:
 
   # ============================================================
-  # 1. EC2 PostgreSQL -> JSONL Dataset
+  # 1. EC2 PostgreSQL -> Transformer Dataset
   # ============================================================
   export-dataset:
+
     if: ${{ inputs.dataset_run_id == '' }}
 
     runs-on:
@@ -55,13 +56,13 @@ jobs:
 
     timeout-minutes: 20
 
+
     steps:
 
       - name: Checkout repository
         uses: actions/checkout@v4
 
 
-      # EC2에서는 setup-python 정상 사용
       - name: Setup Python 3.12
         uses: actions/setup-python@v5
         with:
@@ -74,9 +75,6 @@ jobs:
           python -m pip install -r transformer/configs/requirements-dataset.txt
 
 
-      # ----------------------------------------------------------
-      # PostgreSQL -> section-level JSONL
-      # ----------------------------------------------------------
       - name: Export PostgreSQL papers and build dataset
         env:
           POSTGRES_HOST: '127.0.0.1'
@@ -91,9 +89,9 @@ jobs:
 
 
       # ----------------------------------------------------------
-      # manifest 확인
+      # 생성된 Dataset 확인
       # ----------------------------------------------------------
-      - name: Inspect dataset manifest
+      - name: Inspect dataset
         run: |
           python - <<'PY'
           import json
@@ -124,28 +122,10 @@ jobs:
               )
           )
 
+          print()
           print("=" * 70)
-          PY
-
-
-      # ----------------------------------------------------------
-      # train / validation / test 개수 및 section 비율 확인
-      # ----------------------------------------------------------
-      - name: Inspect dataset counts
-        run: |
-          python - <<'PY'
-          import json
-          from pathlib import Path
-
-          root = Path(
-              "artifacts/dataset-${{ github.run_id }}-${{ github.run_attempt }}"
-          )
-
+          print("SECTION COUNTS")
           print("=" * 70)
-          print("DATASET COUNTS")
-          print("=" * 70)
-
-          grand_total = 0
 
           for split in ("train", "validation", "test"):
 
@@ -156,116 +136,42 @@ jobs:
 
               rows = []
 
-              with path.open(encoding="utf-8") as handle:
-                  for line in handle:
-                      if line.strip():
-                          rows.append(json.loads(line))
+              with path.open(
+                  encoding="utf-8"
+              ) as handle:
 
-              section_counts = {
+                  for line in handle:
+
+                      if line.strip():
+                          rows.append(
+                              json.loads(line)
+                          )
+
+              counts = {
                   "Introduction": 0,
                   "Body": 0,
                   "Conclusion": 0,
               }
 
               for row in rows:
+
                   section = row.get("section")
 
-                  if section in section_counts:
-                      section_counts[section] += 1
+                  if section in counts:
+                      counts[section] += 1
 
-              grand_total += len(rows)
+              print(
+                  f"{split}: "
+                  f"{len(rows)} samples "
+                  f"{counts}"
+              )
 
-              print(f"{split}: {len(rows)} samples")
-              print(f"sections: {section_counts}")
-              print()
-
-          print(f"TOTAL: {grand_total} samples")
           print("=" * 70)
           PY
 
 
       # ----------------------------------------------------------
-      # 학습 데이터 몇 건 직접 로그에 출력
-      # ----------------------------------------------------------
-      - name: Inspect training samples
-        run: |
-          python - <<'PY'
-          import json
-          from pathlib import Path
-
-          root = Path(
-              "artifacts/dataset-${{ github.run_id }}-${{ github.run_attempt }}"
-          )
-
-          path = root / "train.jsonl"
-
-          rows = []
-
-          with path.open(encoding="utf-8") as handle:
-              for line in handle:
-
-                  if not line.strip():
-                      continue
-
-                  rows.append(json.loads(line))
-
-                  if len(rows) >= 6:
-                      break
-
-
-          print("=" * 70)
-          print("TRAINING SAMPLE INSPECTION")
-          print("=" * 70)
-
-
-          for index, row in enumerate(rows, 1):
-
-              print()
-              print("#" * 70)
-              print(f"SAMPLE {index}")
-
-              print("paper_id:", row.get("paper_id"))
-              print("section:", row.get("section"))
-
-              value = row.get("input", {})
-
-              print()
-              print("[TITLE]")
-              print(value.get("title"))
-
-              print()
-              print("[TOPIC]")
-              print(value.get("topic"))
-
-              print()
-              print("[RESEARCH QUESTION]")
-              print(value.get("research_question"))
-
-              print()
-              print("[PAPER EVIDENCE]")
-
-              for evidence in value.get("paper_evidence", []):
-                  print("-", evidence)
-
-              print()
-              print("[NEWS EVIDENCE]")
-
-              for evidence in value.get("news_evidence", []):
-                  print("-", evidence)
-
-              print()
-              print("[TARGET]")
-              print(row.get("target"))
-
-
-          print()
-          print("=" * 70)
-          PY
-
-
-      # ----------------------------------------------------------
-      # Dataset Artifact 업로드
-      # DB 비밀정보는 포함되지 않음
+      # EC2 -> GitHub Artifact
       # ----------------------------------------------------------
       - name: Upload dataset artifact
         uses: actions/upload-artifact@v4
@@ -273,8 +179,7 @@ jobs:
         with:
           name: transformer-dataset-${{ github.run_id }}-${{ github.run_attempt }}
 
-          path: |
-            artifacts/dataset-${{ github.run_id }}-${{ github.run_attempt }}/
+          path: artifacts/dataset-${{ github.run_id }}-${{ github.run_attempt }}/
 
           if-no-files-found: error
 
@@ -283,7 +188,7 @@ jobs:
 
 
   # ============================================================
-  # 2. Windows GTX 1050 Runner
+  # 2. Windows GPU Runner
   # ============================================================
   train:
 
@@ -329,23 +234,28 @@ jobs:
 
       RUN_OUTPUT: artifacts/training-${{ github.run_id }}-${{ github.run_attempt }}
 
+      # ----------------------------------------------------------
+      # 네 Windows PC의 실제 Python 3.12 경로
+      # ----------------------------------------------------------
+      PYTHON312_PATH: 'C:\Users\KW\AppData\Local\Programs\Python\Python312\python.exe'
+
 
     steps:
 
+      # ----------------------------------------------------------
+      # Repository
+      # ----------------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
 
       # ==========================================================
-      # 중요:
-      # Windows NETWORK SERVICE Runner에서는
-      # actions/setup-python을 사용하지 않는다.
+      # Windows에서는 actions/setup-python 사용하지 않음
       # ==========================================================
 
 
       # ----------------------------------------------------------
-      # Workflow 입력값 검증
-      # 복잡한 PowerShell if 표현을 사용하지 않는다.
+      # 입력값 검증
       # ----------------------------------------------------------
       - name: Validate manual inputs
         run: |
@@ -387,21 +297,36 @@ jobs:
 
           Write-Host "TRAIN_MODE=$env:TRAIN_MODE"
           Write-Host "TRAIN_EPOCHS=$epochs"
-
-          if ($env:DATASET_RUN_ID) {
-              Write-Host "Reusing dataset run: $env:DATASET_RUN_ID"
-          }
-          else {
-              Write-Host "Using dataset exported by this workflow run"
-          }
-
           Write-Host 'Manual inputs validated.'
 
 
       # ----------------------------------------------------------
-      # Python + PyTorch + CUDA 환경 준비
+      # 실제 Python 3.12 존재 여부 확인
       # ----------------------------------------------------------
-      - name: Prepare persistent Python 3.12 CUDA environment and verify GPU
+      - name: Verify system Python 3.12
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          Write-Host "Expected Python:"
+          Write-Host $env:PYTHON312_PATH
+
+          if (-not (Test-Path $env:PYTHON312_PATH)) {
+              throw "Python 3.12 not found: $env:PYTHON312_PATH"
+          }
+
+          & $env:PYTHON312_PATH --version
+
+          if ($LASTEXITCODE -ne 0) {
+              throw 'Python 3.12 could not be executed by the runner service'
+          }
+
+          Write-Host 'Python 3.12 executable verified.'
+
+
+      # ----------------------------------------------------------
+      # Python venv + PyTorch CUDA 환경
+      # ----------------------------------------------------------
+      - name: Prepare persistent Python 3.12 CUDA environment
         run: |
           $ErrorActionPreference = 'Stop'
 
@@ -409,18 +334,25 @@ jobs:
               $env:RUNNER_TOOL_CACHE `
               'paper-transformer-py312-cu126'
 
-          Write-Host "Training venv: $trainingVenv"
+          Write-Host "System Python:"
+          Write-Host $env:PYTHON312_PATH
+
+          Write-Host "Training venv:"
+          Write-Host $trainingVenv
 
           & ./transformer/training/setup-windows.ps1 `
-              -VenvPath $trainingVenv
+              -VenvPath $trainingVenv `
+              -PythonCommand $env:PYTHON312_PATH
 
           if ($LASTEXITCODE -ne 0) {
               throw 'GPU environment setup failed'
           }
 
+          Write-Host 'GPU Python environment prepared.'
+
 
       # ----------------------------------------------------------
-      # 이번 실행에서 EC2가 생성한 Dataset 다운로드
+      # 이번 실행에서 만든 Dataset 다운로드
       # ----------------------------------------------------------
       - name: Download dataset exported in this run
 
@@ -437,7 +369,7 @@ jobs:
       # ----------------------------------------------------------
       # 과거 Dataset Artifact 재사용
       # ----------------------------------------------------------
-      - name: Download an existing dataset artifact
+      - name: Download existing dataset artifact
 
         if: ${{ inputs.dataset_run_id != '' }}
 
@@ -454,20 +386,20 @@ jobs:
 
 
       # ----------------------------------------------------------
-      # Dataset 파일 확인
+      # Dataset 확인
       # ----------------------------------------------------------
       - name: Verify downloaded dataset
         run: |
           $ErrorActionPreference = 'Stop'
 
-          $files = @(
+          $requiredFiles = @(
               'data/training/train.jsonl',
               'data/training/validation.jsonl',
               'data/training/test.jsonl',
               'data/training/manifest.json'
           )
 
-          foreach ($file in $files) {
+          foreach ($file in $requiredFiles) {
 
               if (-not (Test-Path $file)) {
                   throw "Missing dataset file: $file"
@@ -482,9 +414,9 @@ jobs:
 
 
       # ----------------------------------------------------------
-      # TRAIN_PYTHON 및 CUDA 확인
+      # setup-windows.ps1이 등록한 TRAIN_PYTHON 확인
       # ----------------------------------------------------------
-      - name: Verify Python PyTorch and CUDA
+      - name: Verify training Python
         run: |
           $ErrorActionPreference = 'Stop'
 
@@ -492,38 +424,46 @@ jobs:
               throw 'TRAIN_PYTHON was not set by setup-windows.ps1'
           }
 
-          Write-Host "TRAIN_PYTHON=$env:TRAIN_PYTHON"
+          Write-Host "TRAIN_PYTHON:"
+          Write-Host $env:TRAIN_PYTHON
 
-          & $env:TRAIN_PYTHON `
-              -c "import sys; print('Python:', sys.version)"
+          if (-not (Test-Path $env:TRAIN_PYTHON)) {
+              throw "TRAIN_PYTHON does not exist: $env:TRAIN_PYTHON"
+          }
+
+          & $env:TRAIN_PYTHON --version
 
           if ($LASTEXITCODE -ne 0) {
-              throw 'Python verification failed'
+              throw 'Training Python verification failed'
           }
 
 
-          & $env:TRAIN_PYTHON `
-              -c "import torch; print('Torch:', torch.__version__); print('CUDA available:', torch.cuda.is_available()); print('Torch CUDA:', torch.version.cuda); print('GPU:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'NONE')"
+      # ----------------------------------------------------------
+      # PyTorch + CUDA + GPU 확인
+      # ----------------------------------------------------------
+      - name: Verify PyTorch CUDA and GPU
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          & $env:TRAIN_PYTHON -c "import torch; print('Torch:', torch.__version__); print('CUDA available:', torch.cuda.is_available()); print('Torch CUDA:', torch.version.cuda); print('GPU:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'NONE')"
 
           if ($LASTEXITCODE -ne 0) {
-              throw 'PyTorch CUDA verification failed'
+              throw 'PyTorch verification failed'
           }
 
-
-          & $env:TRAIN_PYTHON `
-              -c "import torch, sys; sys.exit(0 if torch.cuda.is_available() else 1)"
+          & $env:TRAIN_PYTHON -c "import torch, sys; sys.exit(0 if torch.cuda.is_available() else 1)"
 
           if ($LASTEXITCODE -ne 0) {
               throw 'CUDA is not available; GPU training is blocked'
           }
 
+          Write-Host 'CUDA GPU verified.'
+
 
       # ----------------------------------------------------------
-      # Dry Run
-      #
-      # full을 선택해도 반드시 먼저 dry-run 실행
+      # GPU Dry Run
       # ----------------------------------------------------------
-      - name: GPU forward backward checkpoint save and reload dry-run
+      - name: GPU dry-run
         run: |
           $ErrorActionPreference = 'Stop'
 
@@ -545,7 +485,7 @@ jobs:
       # ----------------------------------------------------------
       # Full Training
       # ----------------------------------------------------------
-      - name: Full training after matching dry-run success
+      - name: Full training
 
         if: ${{ inputs.mode == 'full' }}
 
@@ -561,16 +501,16 @@ jobs:
               --output-dir "$env:RUN_OUTPUT/model"
 
           if ($LASTEXITCODE -ne 0) {
-              throw 'Full training failed; inspect logs and failure.json'
+              throw 'Full training failed'
           }
 
           Write-Host 'Full Transformer training passed.'
 
 
       # ----------------------------------------------------------
-      # 결과 Artifact 업로드
+      # 결과 업로드
       # ----------------------------------------------------------
-      - name: Upload model tokenizer checkpoints metadata and logs
+      - name: Upload training artifacts
 
         if: ${{ always() }}
 
@@ -579,8 +519,7 @@ jobs:
         with:
           name: transformer-${{ inputs.mode }}-${{ github.run_id }}-${{ github.run_attempt }}
 
-          path: |
-            ${{ env.RUN_OUTPUT }}/
+          path: ${{ env.RUN_OUTPUT }}/
 
           if-no-files-found: warn
 
