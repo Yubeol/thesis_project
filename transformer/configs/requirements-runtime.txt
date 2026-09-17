@@ -1,0 +1,5 @@
+# Install a compatible torch build first; this file never chooses/replaces a CUDA wheel.
+transformers==4.56.2
+peft==0.17.1
+accelerate==1.10.1
+sentencepiece==0.2.1
