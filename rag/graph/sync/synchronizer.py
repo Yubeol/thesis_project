@@ -212,42 +212,151 @@ def sync_papers_to_graph(
         "failed": failed,
     }
 
-
-def fetch_news_for_graph(limit: int | None = None) -> list[dict]:
-    query = """
-        SELECT news_id, original_language, title_original, content_original,
-               published_at, source, url
-        FROM news ORDER BY news_id
+def ensure_news_graph_sync_column() -> None:
     """
-    params = ()
+    News Graph 증분 동기화를 위한 상태 컬럼을 보장한다.
+    """
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                ALTER TABLE news
+                ADD COLUMN IF NOT EXISTS graph_synced
+                BOOLEAN NOT NULL DEFAULT FALSE
+                """
+            )
+
+        conn.commit()
+
+
+def fetch_unsynced_news(
+    limit: int | None = None,
+    *,
+    reconcile: bool = False,
+) -> list[dict]:
+
+    query = """
+        SELECT
+            news_id,
+            original_language,
+            title_original,
+            content_original,
+            published_at,
+            source,
+            url
+        FROM news
+        WHERE (%s OR graph_synced = FALSE)
+        ORDER BY news_id
+    """
+
+    params = (reconcile,)
+
     if limit is not None:
         query += " LIMIT %s"
-        params = (limit,)
+        params = (reconcile, limit)
+
     with get_connection() as conn:
         with conn.cursor() as cursor:
             cursor.execute(query, params)
             rows = cursor.fetchall()
-    return [dict(zip(("news_id", "original_language", "title_original",
-                      "content_original", "published_at", "source", "url"), row))
-            for row in rows]
 
+    return [
+        dict(
+            zip(
+                (
+                    "news_id",
+                    "original_language",
+                    "title_original",
+                    "content_original",
+                    "published_at",
+                    "source",
+                    "url",
+                ),
+                row,
+            )
+        )
+        for row in rows
+    ]
 
-def sync_news_to_graph(limit: int | None = None) -> dict:
+def mark_news_synced(
+    news_id: int,
+) -> None:
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE news
+                SET graph_synced = TRUE
+                WHERE news_id = %s
+                """,
+                (news_id,),
+            )
+
+        conn.commit()
+
+def sync_news_to_graph(
+    limit: int | None = None,
+    *,
+    reconcile: bool = False,
+) -> dict:
+
+    ensure_news_graph_sync_column()
     ensure_entity_constraints()
+
     resolver = _resolver_or_empty()
-    news = fetch_news_for_graph(limit)
-    synced, mentions, failed = 0, 0, []
+
+    news = fetch_unsynced_news(
+        limit=limit,
+        reconcile=reconcile,
+    )
+
+    synced = 0
+    mentions = 0
+    failed = []
+
     for record in news:
         try:
             merge_news_node(record)
-            resolved = resolve_record(record, "news", resolver)
-            mentions += merge_entity_mentions("News", record["news_id"], resolved["entities"])
-            synced += 1
-        except Exception as exc:
-            LOG.warning("News graph sync failed news_id=%s error=%s", record["news_id"], type(exc).__name__)
-            failed.append({"news_id": record["news_id"], "error_type": type(exc).__name__})
-    return {"requested": len(news), "synced": synced, "mentions": mentions, "failed": failed}
 
+            resolved = resolve_record(
+                record,
+                "news",
+                resolver,
+            )
+
+            mentions += merge_entity_mentions(
+                "News",
+                record["news_id"],
+                resolved["entities"],
+            )
+
+            mark_news_synced(
+                record["news_id"]
+            )
+
+            synced += 1
+
+        except Exception as exc:
+            LOG.warning(
+                "News graph sync failed news_id=%s error=%s",
+                record["news_id"],
+                type(exc).__name__,
+            )
+
+            failed.append(
+                {
+                    "news_id": record["news_id"],
+                    "error_type": type(exc).__name__,
+                }
+            )
+
+    return {
+        "requested": len(news),
+        "synced": synced,
+        "mentions": mentions,
+        "failed": failed,
+    }
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -255,6 +364,11 @@ def main() -> int:
     parser.add_argument("--limit", type=int)
     parser.add_argument("--reconcile-papers", action="store_true",
                         help="Recheck already synced papers after catalogue updates")
+    parser.add_argument(
+        "--reconcile-news",
+        action="store_true",
+        help="Recheck already synced news after catalogue updates",
+    )
     args = parser.parse_args()
     if args.limit is not None and args.limit < 1:
         parser.error("--limit must be positive")
@@ -262,7 +376,10 @@ def main() -> int:
     if args.source in {"papers", "both"}:
         reports["papers"] = sync_papers_to_graph(args.limit, reconcile=args.reconcile_papers)
     if args.source in {"news", "both"}:
-        reports["news"] = sync_news_to_graph(args.limit)
+        reports["news"] = sync_news_to_graph(
+            args.limit,
+            reconcile=args.reconcile_news,
+        )
     print(json.dumps(reports, ensure_ascii=False))
     return 0 if all(not report["failed"] for report in reports.values()) else 1
 
