@@ -1,201 +1,242 @@
-from agent.finalizer.llm_finalizer import (
-    finalize_english_draft,
-)
+from typing import Any
 
-from agent.finalizer.output_limiter import (
-    combine_korean_draft,
-    count_korean_chars,
-    enforce_korean_char_limit,
+from agent.query_analyzer import analyze_query
+from agent.retrieval import retrieve_hybrid
+from agent.evidence import build_evidence_lists
+from agent.draft_generator import generate_transformer_draft
+from agent.adaptive_rag import (
+    analyze_gaps,
+    run_adaptive_retrieval,
 )
+from agent.finalizer import finalize_draft
 
-from agent.translator import (
-    translate_draft_to_korean,
-    translate_query_to_english,
-)
-
-from agent.draft_generator.transformer_adapter import (
-    generate_transformer_draft,
-)
-
-from rag.hybrid import (
-    hybrid_retrieve,
-    validate_or_abstain,
-)
 
 def run_retrieval_pipeline(
     title_ko: str,
     topic_ko: str | None = None,
-) -> dict:
+    *,
+    use_graph: bool = True,
+    strict_graph: bool = False,
+) -> dict[str, Any]:
     """
-    Retrieval까지만 수행하는 파이프라인.
+    Retrieval까지만 수행하는 호환용 파이프라인.
 
-    1. 한국어 → 영어
-    2. Hybrid RAG
-    3. Evidence Validation
+    LLM1 입력 분석
+    → 1차 Hybrid RAG
+    → Evidence 변환
     """
 
-    translated = translate_query_to_english(
-        title_ko=title_ko,
-        topic_ko=topic_ko,
+    topic = topic_ko or title_ko
+
+    analysis = analyze_query(
+        title=title_ko,
+        topic=topic,
+        research_question="",
+        instruction="",
     )
 
-    query_en = translated["query_en"]
+    if not analysis.allowed:
+        return {
+            "allowed": False,
+            "rejection_reason": analysis.rejection_reason,
+            "analysis": analysis.model_dump(),
+            "retrieval": None,
+            "paper_evidence": [],
+            "news_evidence": [],
+        }
 
-    retrieval = hybrid_retrieve(
-        query_en=query_en,
+    retrieval = retrieve_hybrid(
+        paper_queries=analysis.paper_queries,
+        news_queries=analysis.news_queries,
+        use_graph=use_graph,
+        strict_graph=strict_graph,
     )
 
-    decision = validate_or_abstain(
+    paper_evidence, news_evidence = build_evidence_lists(
         retrieval
     )
 
     return {
-        "input": {
-            "title_ko": translated["title_ko"],
-            "topic_ko": translated["topic_ko"],
-        },
-
-        "translated": {
-            "title_en": translated["title_en"],
-            "topic_en": translated["topic_en"],
-            "query_en": query_en,
-        },
-
+        "allowed": True,
+        "rejection_reason": None,
+        "analysis": analysis.model_dump(),
         "retrieval": retrieval,
+        "paper_evidence": paper_evidence,
+        "news_evidence": news_evidence,
+    }
 
-        "decision": decision,
+
+def generate_paper(
+    *,
+    title: str = "",
+    topic: str = "",
+    research_question: str = "",
+    instruction: str = "",
+    use_graph: bool = True,
+    strict_graph: bool = False,
+) -> dict[str, Any]:
+    """
+    전체 논문 생성 파이프라인.
+
+    LLM1
+    → 1차 Hybrid RAG
+    → Transformer 초안
+    → LLM2 Gap Analyzer
+    → 필요 시 2차 Hybrid RAG
+    → LLM3 Finalizer
+    """
+
+    # 1. LLM1
+    analysis = analyze_query(
+        title=title,
+        topic=topic,
+        research_question=research_question,
+        instruction=instruction,
+    )
+
+    # 범위 밖 주제는 즉시 종료
+    if not analysis.allowed:
+        return {
+            "allowed": False,
+            "rejection_reason": analysis.rejection_reason,
+            "title": analysis.title,
+            "topic": analysis.topic,
+            "research_question": analysis.research_question,
+            "draft": None,
+            "final": None,
+            "gap_analysis": None,
+            "adaptive_retrieval_performed": False,
+            "evidence_count": {
+                "initial_papers": 0,
+                "initial_news": 0,
+                "final_papers": 0,
+                "final_news": 0,
+            },
+            "retrieval_debug": {},
+        }
+
+    # 2. 1차 Hybrid RAG
+    initial_retrieval = retrieve_hybrid(
+        paper_queries=analysis.paper_queries,
+        news_queries=analysis.news_queries,
+        use_graph=use_graph,
+        strict_graph=strict_graph,
+    )
+
+    paper_evidence, news_evidence = build_evidence_lists(
+        initial_retrieval
+    )
+
+    # 3. Transformer
+    draft = generate_transformer_draft(
+        title=analysis.title,
+        topic=analysis.topic,
+        research_question=analysis.research_question,
+        paper_evidence=paper_evidence,
+        news_evidence=news_evidence,
+        instruction=analysis.instruction,
+    )
+
+    # 4. LLM2
+    gap_analysis = analyze_gaps(
+        title=analysis.title,
+        topic=analysis.topic,
+        research_question=analysis.research_question,
+        draft=draft,
+        paper_evidence=paper_evidence,
+        news_evidence=news_evidence,
+    )
+
+    # 5. 필요 시 2차 RAG
+    adaptive_result = run_adaptive_retrieval(
+        gap_analysis=gap_analysis,
+        current_retrieval=initial_retrieval,
+        use_graph=use_graph,
+        strict_graph=strict_graph,
+    )
+
+    final_retrieval = adaptive_result["retrieval"]
+
+    final_paper_evidence, final_news_evidence = (
+        build_evidence_lists(
+            final_retrieval
+        )
+    )
+
+    # 6. LLM3
+    final = finalize_draft(
+        title=analysis.title,
+        topic=analysis.topic,
+        research_question=analysis.research_question,
+        draft=draft,
+        gap_analysis=gap_analysis,
+        paper_evidence=final_paper_evidence,
+        news_evidence=final_news_evidence,
+    )
+
+    # 7. 반환
+    return {
+        "allowed": True,
+        "rejection_reason": None,
+
+        "title": analysis.title,
+        "topic": analysis.topic,
+        "research_question": analysis.research_question,
+
+        "draft": draft,
+        "final": final,
+
+        "gap_analysis": gap_analysis.model_dump(),
+
+        "adaptive_retrieval_performed": (
+            adaptive_result["performed"]
+        ),
+
+        "evidence_count": {
+            "initial_papers": len(
+                initial_retrieval.get("papers", [])
+            ),
+            "initial_news": len(
+                initial_retrieval.get("news", [])
+            ),
+            "final_papers": len(
+                final_retrieval.get("papers", [])
+            ),
+            "final_news": len(
+                final_retrieval.get("news", [])
+            ),
+        },
+
+        "retrieval_debug": final_retrieval.get(
+            "debug",
+            {},
+        ),
     }
 
 
 def run_agent_pipeline(
     title_ko: str,
     topic_ko: str | None = None,
-) -> dict:
+) -> dict[str, Any]:
     """
-    논문 생성 Agent 전체 Pipeline.
-
-    1. 한국어 제목/주제 → 영어
-    2. Hybrid RAG
-    3. Evidence Validation
-    4. 근거 부족 → Abstain
-    5. Transformer 초안
-    6. LLM 영문 최종 초안
-    7. 한국어 번역
-    8. 제목 추가
-    9. 4500자 제한
+    기존 호출 코드 호환용 진입점.
+    내부적으로 새 generate_paper() 파이프라인을 사용한다.
     """
 
-    # -----------------------------------------
-    # 1. Retrieval Pipeline
-    # -----------------------------------------
-
-    retrieval_result = run_retrieval_pipeline(
-        title_ko=title_ko,
-        topic_ko=topic_ko,
+    result = generate_paper(
+        title=title_ko,
+        topic=topic_ko or title_ko,
     )
 
-    decision = retrieval_result["decision"]
-
-    # -----------------------------------------
-    # 2. Evidence 부족 → 즉시 중단
-    # -----------------------------------------
-
-    if decision["action"] == "abstain":
-        return {
-            **retrieval_result,
-
-            "status": "abstained",
-
-            "transformer_draft": None,
-            "draft_en": None,
-            "draft_ko": None,
-            "final_text": None,
-            "character_count": 0,
-
-            "message": decision["message"],
-        }
-
-    translated = retrieval_result["translated"]
-
-    # -----------------------------------------
-    # 3. Transformer
-    # -----------------------------------------
-
-    transformer_draft = (
-        generate_transformer_draft(
-            title=translated["title_en"],
-            topic=translated["topic_en"],
-            retrieval=retrieval_result[
-                "retrieval"
-            ],
-        )
-    )
-
-    # -----------------------------------------
-    # 4. LLM Finalizer
-    # -----------------------------------------
-
-    draft_en = finalize_english_draft(
-        title_en=translated["title_en"],
-        topic_en=translated["topic_en"],
-        transformer_draft=transformer_draft,
-        retrieval=retrieval_result[
-            "retrieval"
-        ],
-    )
-
-    # -----------------------------------------
-    # 5. English → Korean
-    # -----------------------------------------
-
-    draft_ko = translate_draft_to_korean(
-        draft_en
-    )
-
-    # 사용자가 입력한 원래 논문 제목 유지
-    draft_ko["title"] = title_ko.strip()
-
-    # -----------------------------------------
-    # 6. 4500자 제한
-    # -----------------------------------------
-
-    draft_ko = enforce_korean_char_limit(
-        draft_ko,
-        max_chars=4500,
-    )
-
-    # -----------------------------------------
-    # 7. 최종 출력 문자열 생성
-    # -----------------------------------------
-
-    final_text = combine_korean_draft(
-        draft_ko
-    )
-
-    character_count = count_korean_chars(
-        draft_ko
-    )
-
-    # -----------------------------------------
-    # 8. 반환
-    # -----------------------------------------
-
+    # 기존 호출부에서 사용하던 키 일부 유지
     return {
-        **retrieval_result,
-
-        "status": "completed",
-
-        "transformer_draft": (
-            transformer_draft
+        **result,
+        "status": (
+            "completed"
+            if result["allowed"]
+            else "abstained"
         ),
-
-        "draft_en": draft_en,
-
-        "draft_ko": draft_ko,
-
-        "final_text": final_text,
-
-        "character_count": character_count,
-
-        "message": None,
+        "transformer_draft": result.get("draft"),
+        "final_text": result.get("final"),
+        "message": result.get("rejection_reason"),
     }

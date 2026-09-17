@@ -1,4 +1,5 @@
 from .orchestrator import (
+    generate_paper,
     run_agent_pipeline,
     run_retrieval_pipeline,
 )
@@ -10,7 +11,7 @@ from .translator import (
     translate_to_korean,
 )
 
-from .draft_generator.transformer_adapter import (
+from .draft_generator import (
     build_evidence_text,
     generate_transformer_draft,
 )
@@ -26,6 +27,7 @@ from .finalizer.output_limiter import (
 )
 
 __all__ = [
+    "generate_paper",
     "run_agent_pipeline",
     "run_retrieval_pipeline",
     "translate_to_english",
