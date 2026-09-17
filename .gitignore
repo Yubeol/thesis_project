@@ -45,3 +45,6 @@ data/training/validation/*
 !data/training/validation/.gitkeep
 data/training/test/*
 !data/training/test/.gitkeep
+
+# Local Transformer model artifact
+transformer/models/transformer-full/
