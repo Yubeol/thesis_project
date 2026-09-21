@@ -2,28 +2,32 @@
 import { useEffect, useRef, useState } from 'react';
 import { CopyIcon, DownloadIcon, CheckIcon } from './Icons';
 
+// 다운로드/복사 파일 안에 들어가는 팀 정보. 팀명이 바뀌면 이 한 줄만 고치세요.
+const TEAM_NAME = 'Team C (류민규, 박수암, 이혜림)';
+
 const SOURCE_TYPE_LABEL = {
   paper: '논문',
   news: '뉴스',
 };
+
+const FOOTER_NOTICE = `※ 본 문서는 ${TEAM_NAME}의 논문 초안 AI-Agent(RAG + Transformer)가 생성한 초안입니다. 근거 자료를 직접 확인한 뒤 사용하세요.`;
 
 // http/https 주소만 링크로 허용합니다. (목업의 '#'은 텍스트로만 표시됨)
 function safeUrl(url) {
   return typeof url === 'string' && /^https?:\/\//i.test(url) ? url : null;
 }
 
-function sourceLine(source, i, withMarkdown) {
+function sourceLine(source, i) {
   const label = SOURCE_TYPE_LABEL[source.type] ?? '기타';
   const url = safeUrl(source.url);
-  const tail = url ? ` — ${url}` : '';
-  return withMarkdown
-    ? `${i + 1}. [${label}] ${source.title}${tail}`
-    : `${i + 1}. [${label}] ${source.title}${tail}`;
+  return `${i + 1}. [${label}] ${source.title}${url ? ` — ${url}` : ''}`;
 }
 
 function buildMarkdown(draft) {
   const lines = [
     `# ${draft.title}`,
+    '',
+    `**팀명:** ${TEAM_NAME}`,
     '',
     '## 서론',
     draft.introduction,
@@ -37,9 +41,10 @@ function buildMarkdown(draft) {
 
   if (draft.sources && draft.sources.length > 0) {
     lines.push('', '## 근거 자료');
-    draft.sources.forEach((source, i) => lines.push(sourceLine(source, i, true)));
+    draft.sources.forEach((source, i) => lines.push(sourceLine(source, i)));
   }
 
+  lines.push('', '---', FOOTER_NOTICE);
   return lines.join('\n');
 }
 
@@ -47,6 +52,7 @@ function buildMarkdown(draft) {
 function buildPlainText(draft) {
   const lines = [
     draft.title,
+    `팀명: ${TEAM_NAME}`,
     '',
     '[서론]',
     draft.introduction,
@@ -60,9 +66,10 @@ function buildPlainText(draft) {
 
   if (draft.sources && draft.sources.length > 0) {
     lines.push('', '[근거 자료]');
-    draft.sources.forEach((source, i) => lines.push(sourceLine(source, i, false)));
+    draft.sources.forEach((source, i) => lines.push(sourceLine(source, i)));
   }
 
+  lines.push('', '----------------', FOOTER_NOTICE);
   return lines.join('\n');
 }
 
