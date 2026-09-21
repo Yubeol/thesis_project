@@ -150,11 +150,11 @@ def generate_paper(
         return {
             "status": "abstained",
             "draft": None,
-            "character_count": 0,
+            "sources": [],
             "message": (
-                result.get("message")
-                or result.get("rejection_reason")
-                or "해당 주제는 현재 서비스에서 지원하지 않습니다."
+                    result.get("message")
+                    or result.get("rejection_reason")
+                    or "해당 주제는 현재 서비스에서 지원하지 않습니다."
             ),
         }
 
@@ -188,18 +188,12 @@ def generate_paper(
         fallback_title=title_ko,
     )
 
-    character_count = sum(
-        len(value)
-        for value in (
-            draft["introduction"],
-            draft["body"],
-            draft["conclusion"],
-        )
-    )
-
     return {
         "status": "completed",
         "draft": draft,
-        "character_count": character_count,
+        "sources": result.get(
+            "sources",
+            [],
+        ),
         "message": None,
     }

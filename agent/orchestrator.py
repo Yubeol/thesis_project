@@ -65,6 +65,102 @@ def run_retrieval_pipeline(
         "news_evidence": news_evidence,
     }
 
+def _build_sources(
+    retrieval: dict[str, Any],
+) -> list[dict[str, str]]:
+    """
+    최종 RAG 검색 결과에서
+    Frontend에 노출할 근거 목록을 생성한다.
+    """
+
+    sources: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    # -------------------------
+    # Papers
+    # -------------------------
+
+    for paper in retrieval.get("papers", []):
+        title = str(
+            paper.get("title") or ""
+        ).strip()
+
+        url = str(
+            paper.get("source_url") or ""
+        ).strip()
+
+        # source_url이 없으면 DOI 링크 사용
+        if not url:
+            doi = str(
+                paper.get("doi") or ""
+            ).strip()
+
+            if doi:
+                doi = doi.removeprefix("doi:").strip()
+
+                if doi.startswith(
+                    ("http://", "https://")
+                ):
+                    url = doi
+                else:
+                    url = f"https://doi.org/{doi}"
+
+        # 프론트에서 실제 출처로 보여줄 수 있는
+        # 제목 + URL이 있는 항목만 포함
+        if not title or not url:
+            continue
+
+        key = ("paper", url)
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+
+        sources.append(
+            {
+                "type": "paper",
+                "title": title,
+                "url": url,
+            }
+        )
+
+    # -------------------------
+    # News
+    # -------------------------
+
+    for news in retrieval.get("news", []):
+        title = str(
+            news.get("title_original")
+            or news.get("title_en")
+            or news.get("title")
+            or ""
+        ).strip()
+
+        url = str(
+            news.get("url") or ""
+        ).strip()
+
+        if not title or not url:
+            continue
+
+        key = ("news", url)
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+
+        sources.append(
+            {
+                "type": "news",
+                "title": title,
+                "url": url,
+            }
+        )
+
+    return sources
+
 
 def generate_paper(
     *,
@@ -98,6 +194,7 @@ def generate_paper(
     if not analysis.allowed:
         return {
             "allowed": False,
+            "sources": [],
             "rejection_reason": analysis.rejection_reason,
             "title": analysis.title,
             "topic": analysis.topic,
@@ -198,6 +295,10 @@ def generate_paper(
 
         "draft": draft,
         "final": final,
+
+        "sources": _build_sources(
+            final_retrieval
+        ),
 
         "gap_analysis": gap_analysis.model_dump(),
 
