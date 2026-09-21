@@ -52,6 +52,15 @@ class DraftResponse(BaseModel):
     conclusion: str
 
 
+class SourceResponse(BaseModel):
+    type: Literal[
+        "paper",
+        "news",
+    ]
+    title: str
+    url: str
+
+
 class GenerateResponse(BaseModel):
     status: Literal[
         "completed",
@@ -59,5 +68,9 @@ class GenerateResponse(BaseModel):
     ]
 
     draft: DraftResponse | None = None
-    character_count: int = 0
+
+    sources: list[SourceResponse] = Field(
+        default_factory=list
+    )
+
     message: str | None = None
