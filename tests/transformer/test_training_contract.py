@@ -43,9 +43,15 @@ def test_legacy_agent_call_and_new_signature():
     with patch("transformer.inference.generate._generator") as factory:
         factory.return_value.generate.return_value = "Draft"
         assert generate_draft(title="Example", topic="Fandom", evidence="Legacy combined RAG evidence.") == "Draft"
-        assert factory.return_value.generate.call_args.kwargs["paper_evidence"] == ["Legacy combined RAG evidence."]
+        paper = factory.return_value.generate.call_args.kwargs["paper_evidence"]
+        assert len(paper) == 1
+        assert paper[0].startswith("[PAPER 1]\nTitle: [UNTITLED]\nEvidence: ")
+        assert paper[0].endswith("Legacy combined RAG evidence.")
         generate_draft("Example", "Fandom", "What changed?", ["Paper evidence."], ["News evidence."], "Write a draft.")
-        assert factory.return_value.generate.call_args.kwargs["news_evidence"] == ["News evidence."]
+        news = factory.return_value.generate.call_args.kwargs["news_evidence"]
+        assert len(news) == 1
+        assert news[0].startswith("[NEWS 1]\nTitle: [UNTITLED]\nSource: [UNKNOWN_SOURCE]\nEvidence: ")
+        assert news[0].endswith("News evidence.")
 
 
 def test_conservative_defaults_and_invalid_parameters():

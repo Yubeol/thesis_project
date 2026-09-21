@@ -3,7 +3,15 @@ import random
 
 import pytest
 
-from transformer.dataset.build_dataset import build_samples, export_postgres, write_dataset
+from transformer.dataset import build_dataset
+from transformer.dataset.build_dataset import (
+    build_samples, export_postgres, prepare_news_rows, select_news_evidence, write_dataset,
+)
+from transformer.inference import generate_draft
+from transformer.inference import generate as inference_module
+from transformer.preprocessing.prompts import (
+    encode_input, encode_target, evidence_parts, make_input, parse_sections, render_prompt,
+)
 from transformer.training.data import load_splits
 
 
@@ -122,3 +130,96 @@ def test_postgres_export_is_read_only_and_schema_checked(monkeypatch):
     export_postgres()
     assert settings == [{"read_only": True}]
     assert all(q.lstrip().startswith("SELECT") for q in queries)
+
+
+def test_training_inference_share_formatter_and_keep_encoded_payload(monkeypatch):
+    transformers = pytest.importorskip("transformers")
+    tokenizer = transformers.AutoTokenizer.from_pretrained("google/flan-t5-small", local_files_only=True)
+    assert build_dataset.make_input is inference_module.make_input
+    assert build_dataset.encode_input is inference_module.encode_input
+    value = make_input(
+        title="BLACKPINK and TikTok dance challenges",
+        topic="cross-border dance participation",
+        research_question="How do fans share BLACKPINK challenges?",
+        paper_evidence=[
+            "[PAPER 1]\nTitle: BLACKPINK dance research\nAuthors: Example Author\n"
+            "DOI: 10.1/example\nEvidence:\nFans recreate BLACKPINK choreography "
+            "and share dance videos across national borders."
+        ],
+        news_evidence=[
+            "[NEWS 1]\nTitle: BLACKPINK dance videos spread\nSource: Example News\n"
+            "URL: https://example.test/news\nEvidence:\nViewers share short "
+            "BLACKPINK dance videos through social platforms."
+        ],
+        section="Body",
+    )
+    prompt = render_prompt(value)
+    assert prompt.index("Title:") < prompt.index("Paper Evidence:") < prompt.index("News Evidence:")
+    assert prompt.index("News Evidence:") < prompt.index("Instruction:") < prompt.index("Requested Section:")
+    assert "Authors:" not in prompt and "URL:" not in prompt and "DOI:" not in prompt
+    encoded = encode_input(tokenizer, value, 384)
+    decoded = tokenizer.decode(encoded["input_ids"], skip_special_tokens=True)
+    assert len(encoded["input_ids"]) <= 384
+    assert "Requested Section: Body" in decoded
+    assert "Fans recreate BLACKPINK choreography" in decoded
+    assert "Viewers share short BLACKPINK dance videos" in decoded
+    assert "[PAPER 1]" in decoded and "[NEWS 1]" in decoded
+
+    target = "Fans coordinate dance participation across borders in online communities."
+    target_ids = encode_target(tokenizer, target, 384, section="Body")
+    assert len(target_ids) <= 384 and parse_sections(target) == {}
+    assert evidence_parts(value["paper_evidence"][0], "PAPER")["evidence"]
+
+
+def test_news_matching_requires_same_named_subject_and_target():
+    news = prepare_news_rows([
+        {
+            "news_id": 1, "title": "BLACKPINK TikTok dance challenge spreads",
+            "source": "Example News",
+            "content": "BLACKPINK fans share TikTok dance challenges with viewers across borders and communities.",
+        },
+        {
+            "news_id": 2, "title": "ITZY opens a YouTube channel",
+            "source": "Example News",
+            "content": "ITZY members opened a YouTube channel for their recent music videos and fans.",
+        },
+    ])
+    row = {"title": "BLACKPINK TikTok dance challenges"}
+    matched = select_news_evidence(
+        row,
+        "BLACKPINK fans share TikTok dance challenges across national borders.",
+        news,
+    )
+    assert [item[1] for item in matched] == ["1"]
+    assert select_news_evidence(
+        row,
+        "Independent researchers study unrelated educational institutions.",
+        news,
+    ) == []
+
+
+def test_source_paper_split_and_sample_inference_shape(monkeypatch):
+    samples, _ = build_samples(papers())
+    split_ids = {
+        split: {source for row in rows for source in row["source_paper_ids"]}
+        for split, rows in samples.items()
+    }
+    assert not (split_ids["train"] & split_ids["validation"])
+    assert not (split_ids["train"] & split_ids["test"])
+    assert not (split_ids["validation"] & split_ids["test"])
+    sample = samples["train"][0]
+    assert sample["source_paper_id"] == sample["paper_id"]
+    assert sample["section"] == sample["input"]["section"]
+    assert sample["title"] == sample["input"]["title"]
+    assert sample["paper_evidence"] == sample["input"]["paper_evidence"]
+    assert parse_sections(sample["target"]) == {}
+    assert sample["evidence_support_score"] >= 0.16
+    from unittest.mock import Mock
+    factory = Mock()
+    factory.return_value.generate.return_value = "Raw draft"
+    monkeypatch.setattr(inference_module, "_generator", factory)
+    kwargs = {name: sample["input"][name] for name in (
+        "title", "topic", "research_question", "paper_evidence", "news_evidence", "instruction",
+    )}
+    assert generate_draft(**kwargs) == "Raw draft"
+    assert factory.return_value.generate.call_args.kwargs["paper_evidence"] == sample["paper_evidence"]

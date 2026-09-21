@@ -490,6 +490,17 @@ class DraftGenerator:
             self.max_input_length,
         )
 
+        # Grounding validation must use only the prompt content that the
+        # Transformer actually received after the 384-token budget was
+        # applied. Using the pre-budget Evidence here could incorrectly
+        # accept facts that were truncated out of the model input.
+        visible_input_text = clean_text(
+            self.tokenizer.decode(
+                encoded["input_ids"],
+                skip_special_tokens=True,
+            )
+        )
+
         inputs = {
             key: torch.tensor(
                 [
@@ -524,26 +535,10 @@ class DraftGenerator:
             )
         )
 
-        # Title / Topic / RQ도 entity grounding 근거로 인정
-        support_text = " ".join(
-            [
-                value[
-                    "title"
-                ],
-                value[
-                    "topic"
-                ],
-                value[
-                    "research_question"
-                ],
-                *value[
-                    "paper_evidence"
-                ],
-                *value[
-                    "news_evidence"
-                ],
-            ]
-        )
+        # Validate only against the exact encoded/decoded prompt that the
+        # model actually saw. Title / Topic / RQ and Evidence are therefore
+        # accepted as grounding support only if they survived input budgeting.
+        support_text = visible_input_text
 
         text, diagnostics = (
             format_section(
@@ -556,6 +551,16 @@ class DraftGenerator:
         diagnostics[
             "raw_output"
         ] = raw
+
+        diagnostics[
+            "encoded_input_tokens"
+        ] = len(
+            encoded["input_ids"]
+        )
+
+        diagnostics[
+            "validation_support_source"
+        ] = "encoded_visible_input"
 
         return (
             text,
@@ -696,6 +701,50 @@ class DraftGenerator:
         )
 
 
+class SectionAdapterDraftGenerator(DraftGenerator):
+    """One backbone with three LoRA adapters; public generate() stays unchanged."""
+
+    def __init__(self, model_path, device="auto"):
+        import torch
+        from peft import PeftModel
+        from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+        from transformer.training.runtime import check_device
+
+        path = Path(model_path)
+        metadata_path = path / "training_metadata.json"
+        if not metadata_path.is_file():
+            raise ValueError("Section adapter metadata not found")
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        if metadata.get("architecture") != "section_specific_lora":
+            raise ValueError("Not a section-specific LoRA model")
+        backbone = path / metadata["backbone"]
+        adapter_paths = {name: path / metadata["adapters"][name] for name in HEADINGS}
+        if not (backbone / "config.json").is_file() or not all(
+            (adapter / "adapter_config.json").is_file() for adapter in adapter_paths.values()
+        ):
+            raise ValueError("Section backbone or adapter files are missing")
+        self.device = check_device(device)["device"]
+        self.max_input_length = metadata["config"]["max_input_length"]
+        self.max_target_length = metadata["config"]["max_target_length"]
+        torch.set_num_threads(metadata["config"].get("cpu_threads", 8))
+        self.tokenizer = AutoTokenizer.from_pretrained(backbone, local_files_only=True)
+        base = AutoModelForSeq2SeqLM.from_pretrained(backbone, local_files_only=True)
+        self.model = PeftModel.from_pretrained(
+            base, adapter_paths[HEADINGS[0]], adapter_name=HEADINGS[0], is_trainable=False,
+        )
+        for name in HEADINGS[1:]:
+            self.model.load_adapter(adapter_paths[name], adapter_name=name, is_trainable=False)
+        self.model = self.model.to(self.device).eval()
+        self.lock = threading.RLock()
+        self.last_diagnostics = {}
+
+    def _generate_section_with_diagnostics(self, *args, **kwargs):
+        section = normalize_section(kwargs.get("section"), required=True)
+        with self.lock:
+            self.model.set_adapter(section)
+            return super()._generate_section_with_diagnostics(*args, **kwargs)
+
+
 @lru_cache(
     maxsize=1
 )
@@ -703,6 +752,11 @@ def _generator(
     path,
     device,
 ):
+    metadata_path = Path(path) / "training_metadata.json"
+    if metadata_path.is_file():
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        if metadata.get("architecture") == "section_specific_lora":
+            return SectionAdapterDraftGenerator(path, device)
     return DraftGenerator(
         path,
         device,

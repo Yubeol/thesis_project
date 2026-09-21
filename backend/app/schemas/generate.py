@@ -21,7 +21,10 @@ class GenerateRequest(BaseModel):
 
     @field_validator("title_ko")
     @classmethod
-    def validate_title(cls, value: str) -> str:
+    def validate_title(
+        cls,
+        value: str,
+    ) -> str:
         value = value.strip()
 
         if not value:
@@ -57,6 +60,7 @@ class SourceResponse(BaseModel):
         "paper",
         "news",
     ]
+
     title: str
     url: str
 
@@ -69,14 +73,21 @@ class GenerateResponse(BaseModel):
 
     draft: DraftResponse | None = None
 
+    character_count: int = Field(
+        default=0,
+        ge=0,
+    )
+
     sources: list[SourceResponse] = Field(
         default_factory=list
     )
 
     message: str | None = None
 
+
 class DownloadDocxRequest(BaseModel):
     draft: DraftResponse
+
     sources: list[SourceResponse] = Field(
         default_factory=list
     )

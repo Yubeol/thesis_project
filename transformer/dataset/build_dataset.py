@@ -378,7 +378,7 @@ def prepare_news_rows(news_rows):
 
 
 def named_title_anchors(title):
-    """Require a shared named artist/platform, not generic K-pop vocabulary."""
+    """Extract named entities, excluding generic Korean-pop words."""
     return {
         token.casefold()
         for token in re.findall(r"\b(?:[A-Z]{2,}|[A-Z][a-z]+[A-Z][A-Za-z]*)\b", title or "")
@@ -387,10 +387,12 @@ def named_title_anchors(title):
 
 
 def select_news_evidence(row, target, news_rows, max_items=1):
-    """Require distinctive overlap with both the paper and target, not K-pop alone."""
+    """Require a paper-specific named subject in both target and news."""
     anchors = content_terms(row["title"])
-    named_anchors = named_title_anchors(row["title"])
+    platforms = {"tiktok", "youtube", "instagram", "facebook", "twitter", "netflix"}
+    named_anchors = named_title_anchors(row["title"]) - platforms
     target_terms = content_terms(target)
+    target_named = named_anchors & target_terms
     ranked = []
     for news in news_rows or []:
         title = news["title"]
@@ -398,7 +400,14 @@ def select_news_evidence(row, target, news_rows, max_items=1):
         candidate_sentences = news["sentences"]
         title_terms = news["title_terms"]
         article_terms = news["article_terms"]
-        if not named_anchors or not (named_anchors & content_terms(title)):
+        if not target_named or not (target_named & article_terms):
+            continue
+        shared_subject_in_title = bool(target_named & title_terms)
+        shared_platform = bool(
+            platforms & named_title_anchors(row["title"])
+            & named_title_anchors(title) & target_terms
+        )
+        if not shared_subject_in_title and not shared_platform:
             continue
         anchor_overlap = anchors & article_terms
         target_overlap = target_terms & article_terms
