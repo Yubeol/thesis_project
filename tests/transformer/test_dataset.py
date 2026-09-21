@@ -8,12 +8,33 @@ from transformer.training.data import load_splits
 
 
 def papers(count=20):
-    return [{"paper_id": i, "title": f"Fandom research case {i}", "language": "en", "keywords": ["fandom"],
-             "doi": f"10.1000/{i}", "content_hash": str(i), "abstract": "An abstract.",
-             "introduction": f"This study investigates how fandom community number {i} coordinates collective activities.",
-             "body": f"Participants in community number {i} describe sharing information across digital networks.",
-             "conclusion": f"Community number {i} illustrates the role of collective participation in cultural exchange."}
-            for i in range(count)]
+    def paragraph(section, paper_id, sentence_count):
+        templates = {
+            "abstract": "Researchers summarize volunteer translation and collective participation in international listener communities for case {paper_id}, observation {index}.",
+            "introduction": "Case {paper_id} examines how collective participation and volunteer translation connect distant listeners through shared cultural projects, question {index}.",
+            "body": "Interview evidence for case {paper_id} describes coordinated translation projects and collective participation among international listeners during activity {index}.",
+            "conclusion": "Findings from case {paper_id} suggest that volunteer translation and collective participation can sustain relationships among distant listeners, implication {index}.",
+        }
+        return " ".join(
+            templates[section].format(paper_id=paper_id, index=index)
+            for index in range(sentence_count)
+        )
+
+    return [
+        {
+            "paper_id": i,
+            "title": f"Fandom research case {i}",
+            "language": "en",
+            "keywords": ["fandom", "digital participation"],
+            "doi": f"10.1000/{i}",
+            "content_hash": str(i),
+            "abstract": paragraph("abstract", i, 3),
+            "introduction": paragraph("introduction", i, 6),
+            "body": paragraph("body", i, 12),
+            "conclusion": paragraph("conclusion", i, 5),
+        }
+        for i in range(count)
+    ]
 
 
 def test_reproducible_paper_split_and_no_unrelated_news():
@@ -22,13 +43,14 @@ def test_reproducible_paper_split_and_no_unrelated_news():
     random.Random(9).shuffle(rows)
     second, report = build_samples(rows)
     assert first == second
-    assert report["counts"] == {"train": 16, "validation": 2, "test": 2}
+    assert report["counts"] == {"train": 48, "validation": 6, "test": 6}
     ids = [{r["paper_id"] for r in first[s]} for s in ("train", "validation", "test")]
     assert not (ids[0] & ids[1] or ids[0] & ids[2] or ids[1] & ids[2])
     for samples in first.values():
         for sample in samples:
             assert sample["input"]["news_evidence"] == ["[NO_NEWS_EVIDENCE]"]
-            assert "Conclusion:\n" in sample["target"]
+            assert sample["section"] in {"Introduction", "Body", "Conclusion"}
+            assert "Introduction:\n" not in sample["target"]
             assert "…" not in sample["target"]
 
 
@@ -38,8 +60,11 @@ def test_duplicate_aliases_stay_together_transitively():
     transitive = {**rows[1], "paper_id": 101, "title": duplicate["title"]}
     samples, report = build_samples(rows + [duplicate, transitive])
     containing = [r for split in samples.values() for r in split if "0" in r["source_paper_ids"]]
-    assert len(containing) == 1
-    assert set(containing[0]["source_paper_ids"]) == {"0", "1", "100", "101"}
+    assert len(containing) == 3
+    assert all(
+        set(sample["source_paper_ids"]) == {"0", "1", "100", "101"}
+        for sample in containing
+    )
     assert report["duplicates_grouped"] == 3
 
 
@@ -48,8 +73,11 @@ def test_missing_sections_and_non_english_are_rejected():
     rows[0]["conclusion"] = None
     rows[1]["language"] = "ko"
     samples, report = build_samples(rows)
-    assert sum(map(len, samples.values())) == 3
-    assert report["rejected"] == {"no_usable_section_sentence": 1, "non_english_or_unknown_language": 1}
+    assert sum(map(len, samples.values())) == 9
+    assert report["rejected"] == {
+        "section_too_short_conclusion": 1,
+        "non_english_or_unknown_language": 1,
+    }
 
 
 def test_export_and_loader_validate_snapshot(tmp_path):
@@ -93,4 +121,4 @@ def test_postgres_export_is_read_only_and_schema_checked(monkeypatch):
     monkeypatch.setattr(db, "connect", connect)
     export_postgres()
     assert settings == [{"read_only": True}]
-    assert all(q.startswith("SELECT ") for q in queries)
+    assert all(q.lstrip().startswith("SELECT") for q in queries)

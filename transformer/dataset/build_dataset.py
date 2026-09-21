@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 import hashlib
 import json
 from pathlib import Path
@@ -13,7 +14,11 @@ import unicodedata
 from transformer.preprocessing.prompts import (
     HEADINGS,
     clean_text,
+    encode_input,
+    encode_target,
+    format_evidence_item,
     make_input,
+    render_prompt,
 )
 
 
@@ -45,9 +50,20 @@ SECTION_FIELDS = {
 # 각 section의 학습 Target 길이.
 # 너무 짧은 한 문장짜리 Target을 방지한다.
 TARGET_WORD_LIMITS = {
-    "Introduction": (50, 150),
-    "Body": (100, 260),
-    "Conclusion": (40, 130),
+    "Introduction": (50, 130),
+    "Body": (100, 180),
+    "Conclusion": (40, 110),
+}
+
+SUPPORT_STOPWORDS = {
+    "about", "across", "after", "also", "among", "based", "been", "between",
+    "could", "from", "have", "into", "more", "most", "other", "over",
+    "paper", "research", "result", "results", "show", "shows", "study",
+    "such", "than", "that", "their", "there", "these", "this", "those",
+    "through", "under", "using", "were", "what", "when", "where", "which",
+    "while", "with", "would", "kpop", "korean", "culture", "social", "media",
+    "global", "music", "fandom", "fans", "digital", "online", "analysis",
+    "the", "and", "for", "are", "not", "its", "can", "has", "was", "one",
 }
 
 # 논문 본문에 섞여 들어오는 메타데이터/잡음 제거용
@@ -59,7 +75,31 @@ METADATA_PATTERNS = (
     r"\bdoi\s*:",
     r"©",
     r"all rights reserved",
+    r"\b(?:table|figure|appendix|contents)\s+\d+\b",
+    r"\b(?:references|bibliography)\b",
+    r"\b(?:university|department|faculty)\s+of\b.*\bemail\b",
+    r"\b(?:bachelor.?s student|department of|faculty of|university of)\b",
+    r"\b(?:CFI|TLI|RMSEA|SRMR)\b",
 )
+
+
+def export_news_postgres(env_file=None):
+    """Read only the existing English RAG-ready news; never pair by recency alone."""
+    from pipeline.common.database import DEFAULT_ENV, connect
+
+    with connect(Path(env_file) if env_file else DEFAULT_ENV, read_only=True) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """SELECT news_id, title_en_for_rag, content_en_for_rag, source
+                   FROM public.news
+                   WHERE title_en_for_rag IS NOT NULL
+                     AND content_en_for_rag IS NOT NULL
+                   ORDER BY news_id"""
+            )
+            return [
+                {"news_id": news_id, "title": title, "content": content, "source": source}
+                for news_id, title, content, source in cursor.fetchall()
+            ]
 
 
 def export_postgres(env_file=None):
@@ -132,6 +172,33 @@ def normalized(value):
     ).strip()
 
 
+def content_terms(value):
+    return {
+        token for token in normalized(value).split()
+        if len(token) >= 4 and token not in SUPPORT_STOPWORDS
+    }
+
+
+def is_near_copy(left, right):
+    a, b = normalized(left), normalized(right)
+    if a == b:
+        return True
+    left_terms, right_terms = set(a.split()), set(b.split())
+    if not left_terms or not right_terms:
+        return False
+    overlap = len(left_terms & right_terms) / len(left_terms | right_terms)
+    if overlap >= 0.82:
+        return True
+    # Expensive character comparison is only useful for plausible copies.
+    return overlap >= 0.55 and SequenceMatcher(None, a, b).ratio() >= 0.84
+
+
+def support_score(target, evidence):
+    target_terms = content_terms(target)
+    evidence_terms = content_terms(" ".join(evidence))
+    return len(target_terms & evidence_terms) / max(1, len(target_terms))
+
+
 def is_metadata_sentence(text):
     text = clean_text(text)
 
@@ -186,7 +253,17 @@ def sentences(text):
         words = sentence.split()
 
         # 너무 짧거나 비정상적으로 긴 문장 제외
-        if not 8 <= len(words) <= 90:
+        if not 8 <= len(words) <= 70:
+            continue
+
+        if not re.search(r"[.!?][\"'”’]?\s*$", sentence):
+            continue
+
+        if re.search(r"(?:\.{3,}|[_=]{3,}|\s[,;:]\s[,;:])", sentence):
+            continue
+
+        numeric_words = sum(bool(re.search(r"\d", word)) for word in words)
+        if numeric_words >= 4 and numeric_words / len(words) >= 0.12:
             continue
 
         english_ratio = (
@@ -244,116 +321,102 @@ def select_evidence(
     keywords,
     max_items=4,
 ):
-    """
-    Target과 동일한 문장을 Evidence에 넣지 않는다.
-
-    Evidence 우선순위:
-    1. abstract
-    2. 현재 Target이 아닌 다른 section
-
-    예:
-    Introduction을 생성하는 샘플이라면
-    Evidence는 abstract + body/conclusion에서 가져올 수 있다.
-    """
-    target_sentence_norms = {
-        normalized(sentence)
-        for sentence in sentences(target_text)
-    }
-
-    query_terms = set(
-        normalized(
-            " ".join(
-                [
-                    clean_text(row.get("title")),
-                    *keywords[:8],
-                ]
-            )
-        ).split()
+    """Rank non-copy sentences by their support for the requested target."""
+    target_sentences = sentences(target_text)
+    target_terms = content_terms(target_text)
+    sources = [("abstract", row.get("abstract"), 2)]
+    sources.extend(
+        (field, row.get(field), 1)
+        for section, field in SECTION_FIELDS.items()
+        if section != target_section
     )
+    # Later sentences in the same section may support an earlier target.
+    sources.append((target_section.lower(), row.get(SECTION_FIELDS[target_section]), 0))
+    ranked, seen = [], set()
 
-    query_terms -= {
-        "the",
-        "and",
-        "of",
-        "in",
-        "to",
-        "a",
-        "an",
-        "for",
-        "on",
-        "with",
-    }
-
-    # abstract는 evidence로 가장 우선 사용
-    sources = [
-        (
-            "abstract",
-            row.get("abstract"),
-            3,
-        ),
-    ]
-
-    # 현재 Target section이 아닌 다른 section도 Evidence 후보로 사용
-    for section, field in SECTION_FIELDS.items():
-        if section != target_section:
-            sources.append(
-                (
-                    field,
-                    row.get(field),
-                    1,
-                )
-            )
-
-    ranked = []
-    seen = set()
-    order = 0
-
-    for _, text, source_bonus in sources:
-        for sentence in sentences(text):
+    for source_name, text, bonus in sources:
+        for order, sentence in enumerate(sentences(text)):
             norm = normalized(sentence)
-
-            if not norm:
-                continue
-
-            # Target과 동일한 문장은 Evidence에서 제외
-            if norm in target_sentence_norms:
-                continue
-
             if norm in seen:
                 continue
-
+            terms = content_terms(sentence)
+            overlap = len(terms & target_terms)
+            if overlap < 2:
+                continue
+            if any(is_near_copy(sentence, target) for target in target_sentences):
+                continue
             seen.add(norm)
-
-            overlap = len(
-                query_terms
-                & set(norm.split())
-            )
-
-            score = source_bonus + overlap
-
-            ranked.append(
-                (
-                    score,
-                    -order,
-                    sentence,
-                )
-            )
-
-            order += 1
+            score = overlap / max(1, len(terms)) + overlap / max(1, len(target_terms))
+            ranked.append((score, bonus, -order, sentence, source_name))
 
     ranked.sort(reverse=True)
+    selected = ranked[:max_items]
+    if not selected:
+        raise ValueError(f"missing_evidence_{target_section.lower()}")
+    return [(sentence, source_name) for _, _, _, sentence, source_name in selected]
 
-    evidence = [
-        sentence
-        for _, _, sentence in ranked[:max_items]
-    ]
 
-    if not evidence:
-        raise ValueError(
-            f"missing_evidence_{target_section.lower()}"
+def prepare_news_rows(news_rows):
+    prepared = []
+    for news in news_rows or []:
+        title = clean_text(news.get("title"))
+        source = clean_text(news.get("source"))
+        candidate_sentences = sentences(news.get("content"))[:8]
+        if not title or not source or not candidate_sentences:
+            continue
+        title_terms = content_terms(title)
+        prepared.append({
+            "news_id": str(news["news_id"]),
+            "title": title,
+            "source": source,
+            "sentences": candidate_sentences,
+            "title_terms": title_terms,
+            "article_terms": content_terms(" ".join(candidate_sentences)) | title_terms,
+            "sentence_terms": [content_terms(sentence) for sentence in candidate_sentences],
+        })
+    return prepared
+
+
+def named_title_anchors(title):
+    """Require a shared named artist/platform, not generic K-pop vocabulary."""
+    return {
+        token.casefold()
+        for token in re.findall(r"\b(?:[A-Z]{2,}|[A-Z][a-z]+[A-Z][A-Za-z]*)\b", title or "")
+        if token.casefold() not in {"kpop", "korean", "hallyu", "ip", "pop"}
+    }
+
+
+def select_news_evidence(row, target, news_rows, max_items=1):
+    """Require distinctive overlap with both the paper and target, not K-pop alone."""
+    anchors = content_terms(row["title"])
+    named_anchors = named_title_anchors(row["title"])
+    target_terms = content_terms(target)
+    ranked = []
+    for news in news_rows or []:
+        title = news["title"]
+        source = news["source"]
+        candidate_sentences = news["sentences"]
+        title_terms = news["title_terms"]
+        article_terms = news["article_terms"]
+        if not named_anchors or not (named_anchors & content_terms(title)):
+            continue
+        anchor_overlap = anchors & article_terms
+        target_overlap = target_terms & article_terms
+        if len(anchor_overlap) < 2 or len(target_overlap) < 2:
+            continue
+        if not (anchors & title_terms) and len(anchor_overlap) < 3:
+            continue
+        index = max(
+            range(len(candidate_sentences)),
+            key=lambda i: len(news["sentence_terms"][i] & (anchors | target_terms)),
         )
-
-    return evidence
+        evidence_sentence = candidate_sentences[index]
+        if len(news["sentence_terms"][index] & (anchors | target_terms)) < 2:
+            continue
+        score = len(anchor_overlap) + len(target_overlap) + len(anchors & title_terms)
+        ranked.append((score, news["news_id"], title, source, evidence_sentence))
+    ranked.sort(key=lambda item: (-item[0], item[1]))
+    return ranked[:max_items]
 
 
 def identity_keys(row):
@@ -481,6 +544,8 @@ def prepare_paper(row):
 
     targets = {}
     evidence_by_section = {}
+    scores = {}
+    skipped_sections = Counter()
 
     for section in HEADINGS:
         field = SECTION_FIELDS[section]
@@ -490,45 +555,65 @@ def prepare_paper(row):
             section,
         )
 
-        evidence = select_evidence(
-            row=row,
-            target_section=section,
-            target_text=target,
-            keywords=keywords,
-        )
+        try:
+            selected = select_evidence(
+                row=row,
+                target_section=section,
+                target_text=target,
+                keywords=keywords,
+            )
+        except ValueError:
+            skipped_sections["low_evidence_support_" + section.lower()] += 1
+            continue
+
+        evidence = [sentence for sentence, _ in selected]
+        evidence_terms = content_terms(" ".join(evidence))
+        supported_sentences = [
+            sentence for sentence in sentences(target)
+            if len(content_terms(sentence) & evidence_terms) >= 2
+            and len(content_terms(sentence) & evidence_terms)
+            / max(1, len(content_terms(sentence))) >= 0.16
+        ]
+        target = " ".join(supported_sentences)
+        if len(target.split()) < TARGET_WORD_LIMITS[section][0]:
+            skipped_sections["low_evidence_support_" + section.lower()] += 1
+            continue
+        score = support_score(target, evidence)
+        if score < 0.16:
+            skipped_sections["low_evidence_support_" + section.lower()] += 1
+            continue
 
         # 마지막 안전 검사:
         # Target과 Evidence가 완전히 동일한 문장을 공유하는지 확인
-        target_norms = {
-            normalized(sentence)
-            for sentence in sentences(target)
-        }
-
-        evidence_norms = {
-            normalized(sentence)
-            for item in evidence
-            for sentence in sentences(item)
-        }
-
-        if target_norms & evidence_norms:
+        if any(is_near_copy(item, sentence) for item in evidence for sentence in supported_sentences):
             raise ValueError(
                 "target_evidence_overlap_"
                 + section.lower()
             )
 
         targets[section] = target
-        evidence_by_section[section] = evidence
+        evidence_by_section[section] = selected
+        scores[section] = round(score, 4)
+
+    if not targets:
+        raise ValueError("low_evidence_support_all")
 
     return {
         "row": row,
         "targets": targets,
         "evidence": evidence_by_section,
+        "support_scores": scores,
+        "skipped_sections": dict(skipped_sections),
     }
 
 
 def build_samples(
     rows,
     seed=42,
+    news_rows=None,
+    tokenizer=None,
+    max_input_length=384,
+    max_target_length=384,
 ):
     """
     논문 단위로 split한 뒤,
@@ -537,6 +622,7 @@ def build_samples(
     """
     rejected = Counter()
     eligible = []
+    prepared_news = prepare_news_rows(news_rows)
 
     for row in rows:
         try:
@@ -545,6 +631,10 @@ def build_samples(
             )
         except ValueError as exc:
             rejected[str(exc)] += 1
+
+    skipped_sections = Counter()
+    for entry in eligible:
+        skipped_sections.update(entry["skipped_sections"])
 
     # ---------------------------------------------------------
     # duplicate paper를 split 전에 하나의 group으로 묶는다.
@@ -634,6 +724,12 @@ def build_samples(
     }
 
     paper_counts = Counter()
+    seen_targets = set()
+    input_over_budget = 0
+    target_over_budget = 0
+    input_tokens = {section: [] for section in HEADINGS}
+    target_tokens = {section: [] for section in HEADINGS}
+    news_by_section = Counter()
 
     for group, split in zip(
         groups,
@@ -660,50 +756,89 @@ def build_samples(
             }
         )
 
-        # -----------------------------------------------------
-        # 핵심:
-        # 논문 한 편 → 3개의 section sample
-        # -----------------------------------------------------
+        pending = []
+        failed_reason = None
+        pending_input_tokens = {}
+        pending_target_tokens = {}
         for section in HEADINGS:
+            if section not in representative["targets"]:
+                continue
+            selected = representative["evidence"][section]
+            news = select_news_evidence(row, representative["targets"][section], prepared_news)
+            paper_items = [
+                format_evidence_item("PAPER", index, title=row["title"], evidence=sentence)
+                for index, (sentence, _) in enumerate(selected, start=1)
+            ]
+            news_items = [
+                format_evidence_item("NEWS", index, title=title, source=source, evidence=sentence)
+                for index, (_, _, title, source, sentence) in enumerate(news, start=1)
+            ]
             value = make_input(
                 title=row["title"],
                 topic=(
                     ", ".join(keywords[:4])
                     or row["title"]
                 ),
-                paper_evidence=(
-                    representative[
-                        "evidence"
-                    ][section]
-                ),
-                news_evidence=[],
+                paper_evidence=paper_items,
+                news_evidence=news_items,
                 section=section,
             )
+            target = representative["targets"][section]
+            target_key = normalized(target)
+            if target_key in seen_targets or any(normalized(item["target"]) == target_key for item in pending):
+                failed_reason = "duplicate_target"
+                break
+            if tokenizer is not None:
+                raw_input_len = len(tokenizer.encode(render_prompt(value), add_special_tokens=True))
+                raw_target_len = len(tokenizer.encode(target, add_special_tokens=True))
+                input_over_budget += int(raw_input_len > max_input_length)
+                target_over_budget += int(raw_target_len > max_target_length)
+                if raw_target_len > max_target_length:
+                    failed_reason = "target_over_budget"
+                    break
+                try:
+                    encoded = encode_input(tokenizer, value, max_input_length)
+                    encode_target(tokenizer, target, max_target_length, section=section)
+                except ValueError as exc:
+                    failed_reason = "input_contract_" + str(exc).split(";")[0]
+                    break
+                decoded = tokenizer.decode(encoded["input_ids"], skip_special_tokens=True)
+                payload_count = decoded.count("Evidence:") - int("Paper Evidence:" in decoded) - int("News Evidence:" in decoded)
+                if payload_count < 1 + int(bool(news)):
+                    failed_reason = "missing_encoded_evidence_body"
+                    break
+                pending_input_tokens[section] = len(encoded["input_ids"])
+                pending_target_tokens[section] = raw_target_len
+            pending.append({
+                "paper_id": row["paper_id"],
+                "source_paper_id": row["paper_id"],
+                "source_paper_ids": source_paper_ids,
+                "section": section,
+                "title": value["title"],
+                "topic": value["topic"],
+                "research_question": value["research_question"],
+                "paper_evidence": value["paper_evidence"],
+                "news_evidence": value["news_evidence"],
+                "evidence_source_ids": [
+                    {"type": "paper", "id": row["paper_id"], "section": source}
+                    for _, source in selected
+                ] + [{"type": "news", "id": int(news_id)} for _, news_id, _, _, _ in news],
+                "evidence_support_score": representative["support_scores"][section],
+                "input": value,
+                "target": target,
+                "target_kind": "sectional_evidence_supported_v3",
+            })
 
-            output[split].append(
-                {
-                    "paper_id": row["paper_id"],
-
-                    "source_paper_ids": (
-                        source_paper_ids
-                    ),
-
-                    "section": section,
-
-                    "input": value,
-
-                    "target": (
-                        representative[
-                            "targets"
-                        ][section]
-                    ),
-
-                    "target_kind": (
-                        "sectional_weak_supervision_v2"
-                    ),
-                }
-            )
-
+        if failed_reason:
+            rejected[failed_reason] += 1
+            continue
+        output[split].extend(pending)
+        for section in pending_input_tokens:
+            input_tokens[section].append(pending_input_tokens[section])
+            target_tokens[section].append(pending_target_tokens[section])
+        seen_targets.update(normalized(sample["target"]) for sample in pending)
+        for sample in pending:
+            news_by_section[sample["section"]] += int(sample["news_evidence"] != ["[NO_NEWS_EVIDENCE]"])
         paper_counts[split] += 1
 
     report = {
@@ -725,6 +860,22 @@ def build_samples(
         "rejected": dict(
             rejected
         ),
+        "low_evidence_support_removed": sum(
+            skipped_sections.values()
+        ),
+        "skipped_sections": dict(skipped_sections),
+        "raw_input_over_384": input_over_budget,
+        "raw_target_over_384": target_over_budget,
+        "mean_input_tokens_by_section": {
+            name: round(sum(input_tokens[name]) / max(1, len(input_tokens[name])), 2)
+            for name in HEADINGS
+        },
+        "mean_target_tokens_by_section": {
+            name: round(sum(target_tokens[name]) / max(1, len(target_tokens[name])), 2)
+            for name in HEADINGS
+        },
+        "news_by_section": dict(news_by_section),
+        "duplicate_targets_removed": rejected["duplicate_target"],
 
         # 실제 논문 수
         "paper_counts": {
@@ -769,6 +920,7 @@ def write_dataset(
         output_dir
         / "manifest.json"
     )
+    targets.append(output_dir / "dataset_statistics.json")
 
     if any(
         path.exists()
@@ -824,7 +976,7 @@ def write_dataset(
         )
 
     manifest = {
-        "schema_version": 2,
+        "schema_version": 3,
 
         "seed": seed,
 
@@ -851,8 +1003,8 @@ def write_dataset(
 
         "limitations": (
             "Section-level weak supervision from source papers. "
-            "Targets are no longer direct copies of the evidence. "
-            "News is not yet paired and uses NO_NEWS_EVIDENCE. "
+            "Evidence is selected by lexical support, not human entailment review. "
+            "News is attached only after a distinctive topic/target overlap check. "
             "Targets are not human-reviewed abstractive drafts. "
             "Near-duplicate semantic papers may still require review."
         ),
@@ -869,6 +1021,45 @@ def write_dataset(
         )
         + "\n",
         encoding="utf-8",
+    )
+
+    all_samples = [sample for split in SPLITS for sample in samples[split]]
+    source_ids = {
+        split: {
+            str(source_id)
+            for sample in samples[split]
+            for source_id in sample["source_paper_ids"]
+        }
+        for split in SPLITS
+    }
+    overlaps = {
+        f"{left}_vs_{right}": sorted(source_ids[left] & source_ids[right])
+        for left, right in (("train", "validation"), ("train", "test"), ("validation", "test"))
+    }
+    news_count = sum(sample["news_evidence"] != ["[NO_NEWS_EVIDENCE]"] for sample in all_samples)
+    statistics = {
+        "source_papers": report["source_papers"],
+        "eligible_papers": report["eligible_papers"],
+        "total_samples": len(all_samples),
+        "section_counts": dict(Counter(sample["section"] for sample in all_samples)),
+        "split_counts": {split: len(samples[split]) for split in SPLITS},
+        "paper_evidence_samples": sum(bool(sample["paper_evidence"]) for sample in all_samples),
+        "news_evidence_samples": news_count,
+        "no_news_evidence_samples": len(all_samples) - news_count,
+        "news_by_section": report["news_by_section"],
+        "mean_input_tokens_by_section": report["mean_input_tokens_by_section"],
+        "mean_target_tokens_by_section": report["mean_target_tokens_by_section"],
+        "raw_input_over_384": report["raw_input_over_384"],
+        "raw_target_over_384": report["raw_target_over_384"],
+        "duplicate_targets_removed": report["duplicate_targets_removed"],
+        "very_short_targets_under_20_words": sum(len(sample["target"].split()) < 20 for sample in all_samples),
+        "low_evidence_support_removed": report["low_evidence_support_removed"],
+        "rejection_reasons": report["rejected"],
+        "split_source_paper_id_overlap": overlaps,
+        "split_leakage_detected": any(overlaps.values()),
+    }
+    (output_dir / "dataset_statistics.json").write_text(
+        json.dumps(statistics, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
 
     return manifest
@@ -895,6 +1086,9 @@ def main():
             "containing real paper_id values"
         ),
     )
+
+    parser.add_argument("--news-json", type=Path)
+    parser.add_argument("--tokenizer-path", type=str, default="google/flan-t5-small")
 
     parser.add_argument(
         "--output-dir",
@@ -935,9 +1129,15 @@ def main():
                 args.env_file
             )
 
+        if args.news_json:
+            news_rows = json.loads(args.news_json.read_text(encoding="utf-8-sig"))
+        else:
+            news_rows = export_news_postgres(args.env_file)
+
+        from transformers import AutoTokenizer
+        tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_path)
         samples, report = build_samples(
-            rows,
-            args.seed,
+            rows, args.seed, news_rows=news_rows, tokenizer=tokenizer,
         )
 
         manifest = write_dataset(

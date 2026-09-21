@@ -27,6 +27,8 @@ HEADINGS = (
     "Conclusion",
 )
 
+EVIDENCE_BODY_MIN_TOKENS = 8
+
 
 def clean_text(value):
     return re.sub(
@@ -68,6 +70,33 @@ def normalize_section(
         )
 
     return value
+
+
+def format_evidence_item(kind, index, *, title, evidence, source=None):
+    """One compact evidence contract shared by dataset and live inference."""
+    if kind not in {"PAPER", "NEWS"}:
+        raise ValueError("Evidence kind must be PAPER or NEWS")
+    body = clean_text(evidence)
+    if not body:
+        raise ValueError("Evidence body is required")
+    parts = [f"[{kind} {index}]", f"Title: {clean_text(title) or '[UNTITLED]'}"]
+    if kind == "NEWS":
+        parts.append(f"Source: {clean_text(source) or '[UNKNOWN_SOURCE]'}")
+    parts.append(f"Evidence: {body}")
+    return "\n".join(parts)
+
+
+def evidence_parts(item, kind):
+    """Discard long retrieval metadata before any token budget is spent."""
+    raw = str(item or "").strip()
+    title = re.search(r"(?im)^Title:\s*(.*)$", raw)
+    source = re.search(r"(?im)^Source:\s*(.*)$", raw)
+    body = re.search(r"(?ims)^Evidence:\s*(.*)$", raw)
+    return {
+        "title": clean_text(title.group(1)) if title else "[UNTITLED]",
+        "source": clean_text(source.group(1)) if source else "[UNKNOWN_SOURCE]",
+        "evidence": clean_text(body.group(1)) if body else clean_text(raw),
+    }
 
 
 def make_input(
@@ -112,10 +141,11 @@ def make_input(
                 f"{field} must be a list of strings"
             )
 
+        kind = "PAPER" if field == "paper_evidence" else "NEWS"
+        items = [item for item in value if clean_text(item) and clean_text(item) != NO_NEWS]
         return [
-            clean_text(item)
-            for item in value
-            if clean_text(item)
+            format_evidence_item(kind, index, **evidence_parts(item, kind))
+            for index, item in enumerate(items, start=1)
         ]
 
     papers = evidence_list(
@@ -123,14 +153,7 @@ def make_input(
         "paper_evidence",
     )
 
-    news = [
-        item
-        for item in evidence_list(
-            news_evidence,
-            "news_evidence",
-        )
-        if item != NO_NEWS
-    ]
+    news = evidence_list(news_evidence, "news_evidence")
 
     if (
         not papers
@@ -198,14 +221,6 @@ def render_prompt(
     return "\n".join(
         [
             GROUNDING_RULES,
-
-            (
-                "Instruction: "
-                + value[
-                    "instruction"
-                ]
-            ),
-
             (
                 "Title: "
                 + value[
@@ -228,11 +243,6 @@ def render_prompt(
             ),
 
             (
-                "Requested Section: "
-                + section
-            ),
-
-            (
                 "Paper Evidence: "
                 + " | ".join(
                     value[
@@ -250,6 +260,9 @@ def render_prompt(
                 )
             ),
 
+            "Instruction: " + value["instruction"],
+            "Requested Section: " + section,
+
             "Draft Section:",
         ]
     )
@@ -260,9 +273,7 @@ def encode_input(
     value,
     max_length,
 ):
-    """
-    모든 필드를 살리면서 Evidence에 남는 token budget을 분배한다.
-    """
+    """Allocate the content budget after compact metadata, never before it."""
     value = make_input(
         **value
     )
@@ -315,127 +326,43 @@ def encode_input(
             limit,
         )
 
-    source = {
-        "paper_evidence": (
-            value[
-                "paper_evidence"
-            ]
-        ),
-        "news_evidence": (
-            value[
-                "news_evidence"
-            ]
-        ),
+    parsed = {
+        "paper_evidence": [evidence_parts(x, "PAPER") for x in value["paper_evidence"]],
+        "news_evidence": [evidence_parts(x, "NEWS") for x in value["news_evidence"] if x != NO_NEWS],
     }
+    for entries in parsed.values():
+        for entry in entries:
+            entry["title"] = clip(entry["title"], 10)
+            entry["source"] = clip(entry["source"], 5)
 
-    bounded[
-        "paper_evidence"
-    ] = []
+    count = sum(map(len, parsed.values()))
+    if not count:
+        raise ValueError("At least one evidence item is required")
 
-    bounded[
-        "news_evidence"
-    ] = []
-
-    overhead = len(
-        tokenizer.encode(
-            render_prompt(
-                bounded
-            )
-        )
-    )
-
-    remaining = (
-        max_length
-        - overhead
-        - 8
-    )
-
-    items = sum(
-        len(values)
-        for values
-        in source.values()
-    )
-
-    if remaining < 16:
-        raise ValueError(
-            "Input length leaves no evidence budget; "
-            "increase --max-input-length"
-        )
-
-    if items < 1:
-        raise ValueError(
-            "At least one evidence item is required"
-        )
-
-    per_item = max(
-        1,
-        remaining // items,
-    )
-
-    for key, texts in (
-        source.items()
-    ):
-        bounded[key] = [
-            clip(
-                text,
-                per_item,
-            )
-            for text
-            in texts
-        ]
-
-    encoded = tokenizer(
-        render_prompt(
-            bounded
-        ),
-        add_special_tokens=True,
-        truncation=False,
-    )
-
-    while (
-        len(
-            encoded[
-                "input_ids"
-            ]
-        )
-        > max_length
-        and per_item > 1
-    ):
-        per_item -= 1
-
-        for key, texts in (
-            source.items()
-        ):
-            bounded[key] = [
-                clip(
-                    text,
-                    per_item,
+    def render_with_budget(body_budget):
+        for field, kind in (("paper_evidence", "PAPER"), ("news_evidence", "NEWS")):
+            bounded[field] = [
+                format_evidence_item(
+                    kind, index, title=item["title"], source=item["source"],
+                    evidence=clip(item["evidence"], body_budget),
                 )
-                for text
-                in texts
+                for index, item in enumerate(parsed[field], start=1)
             ]
+        if not bounded["news_evidence"]:
+            bounded["news_evidence"] = [NO_NEWS]
+        return tokenizer(render_prompt(bounded), add_special_tokens=True, truncation=False)
 
-        encoded = tokenizer(
-            render_prompt(
-                bounded
-            ),
-            add_special_tokens=True,
-            truncation=False,
-        )
+    minimum = render_with_budget(EVIDENCE_BODY_MIN_TOKENS)
+    if len(minimum["input_ids"]) > max_length:
+        raise ValueError("Input length leaves no evidence body budget; select fewer passages")
 
-    if (
-        len(
-            encoded[
-                "input_ids"
-            ]
-        )
-        > max_length
-    ):
-        raise ValueError(
-            "Too many evidence items for input budget; "
-            "select fewer evidence passages"
-        )
-
+    body_budget = EVIDENCE_BODY_MIN_TOKENS + (max_length - len(minimum["input_ids"])) // count
+    encoded = render_with_budget(body_budget)
+    while len(encoded["input_ids"]) > max_length and body_budget > EVIDENCE_BODY_MIN_TOKENS:
+        body_budget -= 1
+        encoded = render_with_budget(body_budget)
+    if len(encoded["input_ids"]) > max_length:
+        raise ValueError("Input exceeds max length after evidence budgeting")
     return encoded
 
 
