@@ -12,7 +12,7 @@
 // 받도록 normalizeResponse에서 draft.sources로 합쳐서 넘깁니다.
 // 응답 형식이 바뀌면 이 파일의 normalizeResponse만 고치면 됩니다.
 
-const USE_MOCK = true;
+const USE_MOCK = false;
 
 // 목업일 때 재현할 상황: 'completed' | 'abstained' | 'error'
 const MOCK_SCENARIO = 'completed'; // 'completed' | 'abstained' | 'error'

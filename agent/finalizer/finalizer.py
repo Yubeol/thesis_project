@@ -55,6 +55,15 @@ def finalize_draft(
     paper_evidence: list[str],
     news_evidence: list[str],
 ) -> str:
+    """
+    Transformer 1차 초안과 검색 근거를 이용해
+    최종 학술 초안을 생성한다.
+
+    이 함수는 내용 품질과 grounding만 책임진다.
+    최종 한국어 글자 수 4500~4600자 보정은
+    output_limiter.enforce_korean_char_limit()가 담당한다.
+    """
+
     api_key = os.getenv("OPENAI_API_KEY")
 
     if not api_key:
@@ -89,20 +98,35 @@ def finalize_draft(
         research_question,
     )
 
+    paper_evidence_text = _format_evidence(
+        paper_evidence,
+        max_items=15,
+    )
+
+    news_evidence_text = _format_evidence(
+        news_evidence,
+        max_items=8,
+    )
+
     user_prompt = f"""
 OUTPUT LANGUAGE:
 {output_language}
 
 IMPORTANT LANGUAGE INSTRUCTION:
 The entire final draft MUST be written in {output_language}.
-The language of the original draft or retrieved evidence does NOT determine the output language.
+The language of the original draft or retrieved evidence does NOT determine
+the output language.
 Translate and synthesize evidence into {output_language} when necessary.
 
 If OUTPUT LANGUAGE is Korean:
 - Write all prose in Korean.
 - Use the section headings "서론", "본론", and "결론".
 - Do not write the body in English.
-- Keep proper nouns such as TikTok, K-pop, BLACKPINK, and author names in their natural form when appropriate.
+- Keep proper nouns such as TikTok, K-pop, BLACKPINK, YouTube, Instagram,
+  platform names, and author names in their natural form when appropriate.
+
+If OUTPUT LANGUAGE is English:
+- Use the section headings "Introduction", "Body", and "Conclusion".
 
 TITLE:
 {title}
@@ -113,8 +137,15 @@ TOPIC:
 RESEARCH QUESTION:
 {research_question}
 
-ORIGINAL DRAFT:
+ORIGINAL TRANSFORMER FIRST DRAFT:
 {draft}
+
+IMPORTANT ROLE OF THE TRANSFORMER DRAFT:
+The Transformer output is only a first draft.
+It may contain awkward wording, repetition, malformed words,
+mistranslated names, unsupported claims, or weak section structure.
+Do NOT preserve those errors merely because they appear in the draft.
+The supplied evidence is the factual authority.
 
 IDENTIFIED EVIDENCE GAPS:
 {json.dumps(
@@ -158,33 +189,54 @@ or cultural diffusion does NOT by itself prove:
 - brand value,
 - purchasing behavior,
 - commercial opportunities,
-- market success.
+- market success,
+- fandom growth,
+- positive causal effects.
 
-Commercial or causal outcomes may only be stated when the supplied
-evidence explicitly and directly supports them.
+Commercial, causal, directional, or future-oriented outcomes may only be
+stated when the supplied evidence explicitly and directly supports them.
 
-Do not make predictions about future growth, importance, or success
-unless the supplied evidence explicitly contains a supported forecast.
+Do not make predictions about future growth, importance, expansion,
+or success unless the supplied evidence explicitly contains a supported
+forecast.
+
+When evidence supports association, participation, visibility,
+circulation, exposure, or cultural diffusion but not causation,
+use cautious academic wording instead of claiming a proven causal effect.
 
 ACADEMIC PAPER EVIDENCE:
-{_format_evidence(
-    paper_evidence,
-    max_items=15,
-)}
+{paper_evidence_text}
 
 NEWS EVIDENCE:
-{_format_evidence(
-    news_evidence,
-    max_items=8,
-)}
+{news_evidence_text}
+
+STRUCTURE REQUIREMENT:
+If OUTPUT LANGUAGE is Korean:
+- Produce exactly three sections: 서론, 본론, 결론.
+- 서론: explain the research background, problem, purpose,
+  and research question.
+- 본론: make this the longest section.
+  Synthesize and compare multiple evidence items.
+  Explain mechanisms, patterns, relationships, limitations,
+  and contrasting evidence when supported.
+- 결론: directly answer the research question using only supported claims.
+  Summarize the body and do not introduce new evidence.
+
+If OUTPUT LANGUAGE is English:
+- Produce exactly three sections: Introduction, Body, Conclusion.
+
+QUALITY REQUIREMENT:
+- Do not repeat the same claim merely to make the draft longer.
+- Prefer synthesis and comparison across evidence over repetitive summary.
+- Clearly distinguish what the evidence supports from what remains uncertain.
+- Do not invent facts, numbers, names, citations, causal claims,
+  commercial claims, or future predictions.
 
 REMINDER:
 Your final response MUST be written entirely in {output_language}.
 
 Use only claims that can be supported by the evidence above.
-Do not invent new factual, commercial, causal, or future-oriented claims.
-
-Produce the final academic draft.
+Return only the complete academic draft.
 """.strip()
 
     def request(prompt: str) -> str:
@@ -227,11 +279,14 @@ Produce the final academic draft.
         content = request(
             user_prompt
             + "\n\nCORRECTION REQUIRED:\n"
-            + "The previous draft introduced numeric values that do not "
-            + "appear in the supplied evidence: "
+            + "The previous generated draft introduced numeric values that do "
+            + "not appear in the supplied evidence: "
             + ", ".join(unsupported)
-            + ". Remove those values and do not replace them with new "
-            + "numbers. Return the complete corrected draft."
+            + ". Remove those unsupported values. "
+            + "Do not replace them with new numbers or new unsupported claims. "
+            + "Return the complete corrected draft.\n\n"
+            + "PREVIOUS GENERATED DRAFT:\n"
+            + content
         )
 
         unsupported = unsupported_numeric_claims(

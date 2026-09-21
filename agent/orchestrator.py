@@ -1,3 +1,4 @@
+import re
 from typing import Any
 
 from agent.query_analyzer import analyze_query
@@ -9,6 +10,262 @@ from agent.adaptive_rag import (
     run_adaptive_retrieval,
 )
 from agent.finalizer import finalize_draft
+from agent.finalizer.output_limiter import (
+    enforce_korean_char_limit,
+)
+
+
+def _contains_hangul(
+    text: str,
+) -> bool:
+    """
+    문자열에 한글이 포함되어 있는지 확인한다.
+    """
+
+    return any(
+        "\uac00" <= char <= "\ud7a3"
+        for char in (text or "")
+    )
+
+
+def _split_korean_final_draft(
+    text: str,
+) -> dict[str, str]:
+    """
+    Finalizer가 반환한 한국어 문자열을
+    서론 / 본론 / 결론으로 분리한다.
+
+    다음 형식을 모두 지원한다.
+
+    서론
+    ...
+
+    # 서론
+    ...
+
+    ## 서론:
+    ...
+    """
+
+    cleaned = (
+        text
+        or ""
+    ).strip()
+
+    if not cleaned:
+        raise RuntimeError(
+            "Finalizer 결과가 비어 있습니다."
+        )
+
+    # Markdown 코드블록 제거
+    cleaned = re.sub(
+        r"^```(?:markdown|text)?\s*",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+
+    cleaned = re.sub(
+        r"\s*```$",
+        "",
+        cleaned,
+    )
+
+    section_pattern = re.compile(
+        r"(?im)"
+        r"^[ \t]*"
+        r"#{0,3}"
+        r"[ \t]*"
+        r"(서론|본론|결론)"
+        r"[ \t]*"
+        r"[:：]?"
+        r"[ \t]*$"
+    )
+
+    matches = list(
+        section_pattern.finditer(
+            cleaned
+        )
+    )
+
+    if len(matches) < 3:
+        raise RuntimeError(
+            "Finalizer 결과에서 "
+            "서론/본론/결론을 찾을 수 없습니다."
+        )
+
+    sections: dict[str, str] = {}
+
+    for index, match in enumerate(
+        matches
+    ):
+        section_name = (
+            match.group(1)
+        )
+
+        if section_name in sections:
+            continue
+
+        end = (
+            matches[index + 1].start()
+            if index + 1 < len(matches)
+            else len(cleaned)
+        )
+
+        section_text = (
+            cleaned[
+                match.end():end
+            ]
+            .strip()
+        )
+
+        sections[
+            section_name
+        ] = section_text
+
+    required_sections = (
+        "서론",
+        "본론",
+        "결론",
+    )
+
+    if not all(
+        sections.get(section)
+        for section
+        in required_sections
+    ):
+        raise RuntimeError(
+            "Finalizer 결과의 "
+            "서론/본론/결론 중 "
+            "비어 있는 부분이 있습니다."
+        )
+
+    return {
+        "introduction":
+            sections["서론"],
+
+        "body":
+            sections["본론"],
+
+        "conclusion":
+            sections["결론"],
+    }
+
+
+def _combine_korean_sections(
+    draft_ko: dict[str, str],
+) -> str:
+    """
+    Backend가 기존처럼 사용할 수 있도록
+    서론/본론/결론 문자열로 다시 합친다.
+
+    제목은 별도 필드로 전달되므로
+    final 문자열에는 중복해서 넣지 않는다.
+    """
+
+    return (
+        "서론\n"
+        f"{draft_ko['introduction'].strip()}"
+        "\n\n"
+        "본론\n"
+        f"{draft_ko['body'].strip()}"
+        "\n\n"
+        "결론\n"
+        f"{draft_ko['conclusion'].strip()}"
+    )
+
+
+def _limit_korean_final_draft(
+    *,
+    title: str,
+    topic: str,
+    research_question: str,
+    final_text: str,
+) -> str:
+    """
+    한국어 최종 논문을
+    실제 화면 출력 기준 약 4500~4600자로 보정한다.
+
+    output_limiter는 내부적으로 title까지 포함해
+    글자 수를 세기 때문에 여기서는 title을 빈 문자열로
+    전달해 논문 본문 자체의 길이를 맞춘다.
+    """
+
+    language_source = (
+        f"{title} "
+        f"{topic} "
+        f"{research_question}"
+    )
+
+    # 영어 결과에는 한국어 limiter를 적용하지 않는다.
+    if not _contains_hangul(
+        language_source
+    ):
+        return final_text.strip()
+
+    draft_sections = (
+        _split_korean_final_draft(
+            final_text
+        )
+    )
+
+    limiter_input = {
+        # 제목은 API에서 별도 필드로 전달되므로
+        # 최종 본문 글자 수 계산에서는 제외한다.
+        "title": "",
+
+        "introduction":
+            draft_sections[
+                "introduction"
+            ],
+
+        "body":
+            draft_sections[
+                "body"
+            ],
+
+        "conclusion":
+            draft_sections[
+                "conclusion"
+            ],
+    }
+
+    # output_limiter의 combine 함수는
+    # 빈 title 뒤에 \n\n 두 글자를 포함한다.
+    #
+    # 그래서 최소값을 4502로 두면
+    # 실제 반환되는 본문은 최소 약 4500자가 된다.
+    limited = (
+        enforce_korean_char_limit(
+            limiter_input,
+            min_chars=4502,
+            max_chars=4600,
+        )
+    )
+
+    final = (
+        _combine_korean_sections(
+            limited
+        )
+    )
+
+    final_length = len(
+        final
+    )
+
+    if not (
+        4500
+        <= final_length
+        <= 4600
+    ):
+        raise RuntimeError(
+            "최종 한국어 초안이 "
+            "4500~4600자 범위를 "
+            "충족하지 못했습니다: "
+            f"{final_length}자"
+        )
+
+    return final
 
 
 def run_retrieval_pipeline(
@@ -26,7 +283,10 @@ def run_retrieval_pipeline(
     → Evidence 변환
     """
 
-    topic = topic_ko or title_ko
+    topic = (
+        topic_ko
+        or title_ko
+    )
 
     analysis = analyze_query(
         title=title_ko,
@@ -38,32 +298,45 @@ def run_retrieval_pipeline(
     if not analysis.allowed:
         return {
             "allowed": False,
-            "rejection_reason": analysis.rejection_reason,
-            "analysis": analysis.model_dump(),
+            "rejection_reason":
+                analysis.rejection_reason,
+            "analysis":
+                analysis.model_dump(),
             "retrieval": None,
             "paper_evidence": [],
             "news_evidence": [],
         }
 
     retrieval = retrieve_hybrid(
-        paper_queries=analysis.paper_queries,
-        news_queries=analysis.news_queries,
+        paper_queries=
+            analysis.paper_queries,
+
+        news_queries=
+            analysis.news_queries,
+
         use_graph=use_graph,
         strict_graph=strict_graph,
     )
 
-    paper_evidence, news_evidence = build_evidence_lists(
-        retrieval
+    paper_evidence, news_evidence = (
+        build_evidence_lists(
+            retrieval
+        )
     )
 
     return {
         "allowed": True,
         "rejection_reason": None,
-        "analysis": analysis.model_dump(),
-        "retrieval": retrieval,
-        "paper_evidence": paper_evidence,
-        "news_evidence": news_evidence,
+        "analysis":
+            analysis.model_dump(),
+        "retrieval":
+            retrieval,
+        "paper_evidence":
+            paper_evidence,
+        "news_evidence":
+            news_evidence,
     }
+
 
 def _build_sources(
     retrieval: dict[str, Any],
@@ -73,55 +346,93 @@ def _build_sources(
     Frontend에 노출할 근거 목록을 생성한다.
     """
 
-    sources: list[dict[str, str]] = []
-    seen: set[tuple[str, str]] = set()
+    sources: list[
+        dict[str, str]
+    ] = []
+
+    seen: set[
+        tuple[str, str]
+    ] = set()
 
     # -------------------------
     # Papers
     # -------------------------
 
-    for paper in retrieval.get("papers", []):
+    for paper in retrieval.get(
+        "papers",
+        [],
+    ):
         title = str(
-            paper.get("title") or ""
+            paper.get("title")
+            or ""
         ).strip()
 
         url = str(
-            paper.get("source_url") or ""
+            paper.get(
+                "source_url"
+            )
+            or ""
         ).strip()
 
-        # source_url이 없으면 DOI 링크 사용
+        # source_url이 없으면
+        # DOI 링크 사용
         if not url:
             doi = str(
-                paper.get("doi") or ""
+                paper.get("doi")
+                or ""
             ).strip()
 
             if doi:
-                doi = doi.removeprefix("doi:").strip()
+                doi = (
+                    doi
+                    .removeprefix(
+                        "doi:"
+                    )
+                    .strip()
+                )
 
                 if doi.startswith(
-                    ("http://", "https://")
+                    (
+                        "http://",
+                        "https://",
+                    )
                 ):
                     url = doi
-                else:
-                    url = f"https://doi.org/{doi}"
 
-        # 프론트에서 실제 출처로 보여줄 수 있는
-        # 제목 + URL이 있는 항목만 포함
-        if not title or not url:
+                else:
+                    url = (
+                        "https://doi.org/"
+                        f"{doi}"
+                    )
+
+        if (
+            not title
+            or not url
+        ):
             continue
 
-        key = ("paper", url)
+        key = (
+            "paper",
+            url,
+        )
 
         if key in seen:
             continue
 
-        seen.add(key)
+        seen.add(
+            key
+        )
 
         sources.append(
             {
-                "type": "paper",
-                "title": title,
-                "url": url,
+                "type":
+                    "paper",
+
+                "title":
+                    title,
+
+                "url":
+                    url,
             }
         )
 
@@ -129,33 +440,56 @@ def _build_sources(
     # News
     # -------------------------
 
-    for news in retrieval.get("news", []):
+    for news in retrieval.get(
+        "news",
+        [],
+    ):
         title = str(
-            news.get("title_original")
-            or news.get("title_en")
-            or news.get("title")
+            news.get(
+                "title_original"
+            )
+            or news.get(
+                "title_en"
+            )
+            or news.get(
+                "title"
+            )
             or ""
         ).strip()
 
         url = str(
-            news.get("url") or ""
+            news.get("url")
+            or ""
         ).strip()
 
-        if not title or not url:
+        if (
+            not title
+            or not url
+        ):
             continue
 
-        key = ("news", url)
+        key = (
+            "news",
+            url,
+        )
 
         if key in seen:
             continue
 
-        seen.add(key)
+        seen.add(
+            key
+        )
 
         sources.append(
             {
-                "type": "news",
-                "title": title,
-                "url": url,
+                "type":
+                    "news",
+
+                "title":
+                    title,
+
+                "url":
+                    url,
             }
         )
 
@@ -180,13 +514,18 @@ def generate_paper(
     → LLM2 Gap Analyzer
     → 필요 시 2차 Hybrid RAG
     → LLM3 Finalizer
+    → 한국어 4500~4600자 보정
     """
 
+    # -------------------------
     # 1. LLM1
+    # -------------------------
+
     analysis = analyze_query(
         title=title,
         topic=topic,
-        research_question=research_question,
+        research_question=
+            research_question,
         instruction=instruction,
     )
 
@@ -195,136 +534,280 @@ def generate_paper(
         return {
             "allowed": False,
             "sources": [],
-            "rejection_reason": analysis.rejection_reason,
-            "title": analysis.title,
-            "topic": analysis.topic,
-            "research_question": analysis.research_question,
+            "rejection_reason":
+                analysis.rejection_reason,
+
+            "title":
+                analysis.title,
+
+            "topic":
+                analysis.topic,
+
+            "research_question":
+                analysis.research_question,
+
             "draft": None,
             "final": None,
             "gap_analysis": None,
-            "adaptive_retrieval_performed": False,
+
+            "adaptive_retrieval_performed":
+                False,
+
             "evidence_count": {
                 "initial_papers": 0,
                 "initial_news": 0,
                 "final_papers": 0,
                 "final_news": 0,
             },
+
             "retrieval_debug": {},
         }
 
+    # -------------------------
     # 2. 1차 Hybrid RAG
-    initial_retrieval = retrieve_hybrid(
-        paper_queries=analysis.paper_queries,
-        news_queries=analysis.news_queries,
-        use_graph=use_graph,
-        strict_graph=strict_graph,
-    )
+    # -------------------------
 
-    paper_evidence, news_evidence = build_evidence_lists(
-        initial_retrieval
-    )
+    initial_retrieval = (
+        retrieve_hybrid(
+            paper_queries=
+                analysis.paper_queries,
 
-    # The local model has a 384-token input contract. Passing every result
-    # from every expanded query leaves only a few tokens per evidence item.
-    # Keep the complete lists for LLM2/LLM3, but give Transformer the most
-    # relevant bounded subset.
-    transformer_paper_evidence, transformer_news_evidence = (
-        build_evidence_lists(
-            initial_retrieval,
-            max_chars_per_item=1200,
-            max_papers=4,
-            max_news=2,
+            news_queries=
+                analysis.news_queries,
+
+            use_graph=use_graph,
+
+            strict_graph=
+                strict_graph,
         )
     )
 
+    paper_evidence, news_evidence = (
+        build_evidence_lists(
+            initial_retrieval
+        )
+    )
+
+    # Transformer는 384-token input contract를 사용한다.
+    # 전체 검색 결과를 모두 넣으면 Evidence 본문이
+    # 거의 사라질 수 있으므로 가장 관련성 높은 일부만 사용한다.
+    transformer_paper_evidence, \
+        transformer_news_evidence = (
+            build_evidence_lists(
+                initial_retrieval,
+
+                max_chars_per_item=
+                    1200,
+
+                max_papers=4,
+                max_news=2,
+            )
+        )
+
+    # -------------------------
     # 3. Transformer
-    draft = generate_transformer_draft(
-        title=analysis.title,
-        topic=analysis.topic,
-        research_question=analysis.research_question,
-        paper_evidence=transformer_paper_evidence,
-        news_evidence=transformer_news_evidence,
-        instruction=analysis.instruction,
-    )
+    # -------------------------
 
-    # 4. LLM2
-    gap_analysis = analyze_gaps(
-        title=analysis.title,
-        topic=analysis.topic,
-        research_question=analysis.research_question,
-        draft=draft,
-        paper_evidence=paper_evidence,
-        news_evidence=news_evidence,
-    )
+    draft = (
+        generate_transformer_draft(
+            title=
+                analysis.title,
 
-    # 5. 필요 시 2차 RAG
-    adaptive_result = run_adaptive_retrieval(
-        gap_analysis=gap_analysis,
-        current_retrieval=initial_retrieval,
-        use_graph=use_graph,
-        strict_graph=strict_graph,
-    )
+            topic=
+                analysis.topic,
 
-    final_retrieval = adaptive_result["retrieval"]
+            research_question=
+                analysis.research_question,
 
-    final_paper_evidence, final_news_evidence = (
-        build_evidence_lists(
-            final_retrieval
+            paper_evidence=
+                transformer_paper_evidence,
+
+            news_evidence=
+                transformer_news_evidence,
+
+            instruction=
+                analysis.instruction,
         )
     )
 
-    # 6. LLM3
-    final = finalize_draft(
-        title=analysis.title,
-        topic=analysis.topic,
-        research_question=analysis.research_question,
+    # -------------------------
+    # 4. LLM2 Gap Analyzer
+    # -------------------------
+
+    gap_analysis = analyze_gaps(
+        title=
+            analysis.title,
+
+        topic=
+            analysis.topic,
+
+        research_question=
+            analysis.research_question,
+
         draft=draft,
-        gap_analysis=gap_analysis,
-        paper_evidence=final_paper_evidence,
-        news_evidence=final_news_evidence,
+
+        paper_evidence=
+            paper_evidence,
+
+        news_evidence=
+            news_evidence,
     )
 
-    # 7. 반환
+    # -------------------------
+    # 5. Adaptive RAG
+    # -------------------------
+
+    adaptive_result = (
+        run_adaptive_retrieval(
+            gap_analysis=
+                gap_analysis,
+
+            current_retrieval=
+                initial_retrieval,
+
+            use_graph=
+                use_graph,
+
+            strict_graph=
+                strict_graph,
+        )
+    )
+
+    final_retrieval = (
+        adaptive_result[
+            "retrieval"
+        ]
+    )
+
+    final_paper_evidence, \
+        final_news_evidence = (
+            build_evidence_lists(
+                final_retrieval
+            )
+        )
+
+    # -------------------------
+    # 6. LLM3 Finalizer
+    # -------------------------
+
+    final = finalize_draft(
+        title=
+            analysis.title,
+
+        topic=
+            analysis.topic,
+
+        research_question=
+            analysis.research_question,
+
+        draft=
+            draft,
+
+        gap_analysis=
+            gap_analysis,
+
+        paper_evidence=
+            final_paper_evidence,
+
+        news_evidence=
+            final_news_evidence,
+    )
+
+    # -------------------------
+    # 7. 한국어 글자 수 보정
+    # -------------------------
+
+    final = (
+        _limit_korean_final_draft(
+            title=
+                analysis.title,
+
+            topic=
+                analysis.topic,
+
+            research_question=
+                analysis.research_question,
+
+            final_text=
+                final,
+        )
+    )
+
+    # -------------------------
+    # 8. 반환
+    # -------------------------
+
     return {
         "allowed": True,
         "rejection_reason": None,
 
-        "title": analysis.title,
-        "topic": analysis.topic,
-        "research_question": analysis.research_question,
+        "title":
+            analysis.title,
 
-        "draft": draft,
-        "final": final,
+        "topic":
+            analysis.topic,
 
-        "sources": _build_sources(
-            final_retrieval
-        ),
+        "research_question":
+            analysis.research_question,
 
-        "gap_analysis": gap_analysis.model_dump(),
+        "draft":
+            draft,
 
-        "adaptive_retrieval_performed": (
-            adaptive_result["performed"]
-        ),
+        "final":
+            final,
+
+        "sources":
+            _build_sources(
+                final_retrieval
+            ),
+
+        "gap_analysis":
+            gap_analysis.model_dump(),
+
+        "adaptive_retrieval_performed":
+            adaptive_result[
+                "performed"
+            ],
 
         "evidence_count": {
-            "initial_papers": len(
-                initial_retrieval.get("papers", [])
-            ),
-            "initial_news": len(
-                initial_retrieval.get("news", [])
-            ),
-            "final_papers": len(
-                final_retrieval.get("papers", [])
-            ),
-            "final_news": len(
-                final_retrieval.get("news", [])
-            ),
+            "initial_papers":
+                len(
+                    initial_retrieval.get(
+                        "papers",
+                        [],
+                    )
+                ),
+
+            "initial_news":
+                len(
+                    initial_retrieval.get(
+                        "news",
+                        [],
+                    )
+                ),
+
+            "final_papers":
+                len(
+                    final_retrieval.get(
+                        "papers",
+                        [],
+                    )
+                ),
+
+            "final_news":
+                len(
+                    final_retrieval.get(
+                        "news",
+                        [],
+                    )
+                ),
         },
 
-        "retrieval_debug": final_retrieval.get(
-            "debug",
-            {},
-        ),
+        "retrieval_debug":
+            final_retrieval.get(
+                "debug",
+                {},
+            ),
     }
 
 
@@ -339,18 +822,33 @@ def run_agent_pipeline(
 
     result = generate_paper(
         title=title_ko,
-        topic=topic_ko or title_ko,
+        topic=(
+            topic_ko
+            or title_ko
+        ),
     )
 
-    # 기존 호출부에서 사용하던 키 일부 유지
     return {
         **result,
+
         "status": (
             "completed"
             if result["allowed"]
             else "abstained"
         ),
-        "transformer_draft": result.get("draft"),
-        "final_text": result.get("final"),
-        "message": result.get("rejection_reason"),
+
+        "transformer_draft":
+            result.get(
+                "draft"
+            ),
+
+        "final_text":
+            result.get(
+                "final"
+            ),
+
+        "message":
+            result.get(
+                "rejection_reason"
+            ),
     }
