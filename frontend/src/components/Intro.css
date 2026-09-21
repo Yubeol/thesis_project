@@ -1,0 +1,353 @@
+/* src/components/Intro.css */
+
+.intro {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background:
+    radial-gradient(900px 500px at 12% -10%, #fbeefc 0%, transparent 62%),
+    radial-gradient(900px 500px at 92% -8%, #dff7fb 0%, transparent 62%),
+    #f8f8fd;
+  transition: opacity 0.6s ease, transform 0.6s ease, filter 0.6s ease;
+}
+
+.intro.is-leaving {
+  opacity: 0;
+  transform: translateY(-28px) scale(1.02);
+  filter: blur(6px);
+  pointer-events: none;
+}
+
+/* 생성 화면이 인트로 뒤에서 부드럽게 나타남 */
+.app-shell {
+  animation: appEnter 0.6s ease both;
+}
+
+@keyframes appEnter {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* ---------- 배경 빛 덩어리 ---------- */
+
+.intro-blob {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(70px);
+  opacity: 0.55;
+  animation: blobFloat 14s ease-in-out infinite alternate;
+}
+
+.intro-blob--a {
+  width: 380px;
+  height: 380px;
+  left: 14%;
+  top: 22%;
+  background: #cfc6ff;
+}
+
+.intro-blob--b {
+  width: 420px;
+  height: 420px;
+  right: 10%;
+  top: 30%;
+  background: #bfe8fb;
+  animation-delay: -5s;
+}
+
+.intro-blob--c {
+  width: 320px;
+  height: 320px;
+  left: 42%;
+  bottom: 4%;
+  background: #f8cdef;
+  animation-delay: -9s;
+}
+
+@keyframes blobFloat {
+  from {
+    transform: translate(0, 0) scale(1);
+  }
+  to {
+    transform: translate(40px, -30px) scale(1.12);
+  }
+}
+
+/* ---------- 스포트라이트 ---------- */
+
+.intro-beam {
+  position: absolute;
+  top: -10%;
+  left: 50%;
+  width: 46vw;
+  height: 125%;
+  margin-left: -23vw;
+  transform-origin: 50% 0;
+  background: linear-gradient(
+    180deg,
+    rgba(124, 108, 255, 0.16),
+    rgba(240, 138, 216, 0.05) 55%,
+    transparent 85%
+  );
+    filter: blur(14px); /* 윤곽을 흐리게 */
+  clip-path: polygon(46% 0, 54% 0, 100% 100%, 0 100%);
+  animation: beamSway 9s ease-in-out infinite alternate;
+}
+
+.intro-beam--sky {
+  background: linear-gradient(
+    180deg,
+    rgba(79, 182, 240, 0.24),
+    rgba(124, 108, 255, 0.07) 55%,
+    transparent 85%
+  );
+  animation-duration: 11s;
+  animation-delay: -4s;
+}
+
+@keyframes beamSway {
+  from {
+    transform: rotate(calc(var(--r) - 7deg));
+  }
+  to {
+    transform: rotate(calc(var(--r) + 7deg));
+  }
+}
+
+/* ---------- 반짝임 캔버스 ---------- */
+
+.intro-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+/* ---------- 가운데 콘텐츠 ---------- */
+
+.intro-content {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 24px;
+  text-align: center;
+}
+
+.rise {
+  opacity: 0;
+  transform: translateY(20px);
+  animation: rise 0.85s cubic-bezier(0.2, 0.7, 0.2, 1) forwards;
+  animation-delay: var(--d, 0s);
+}
+
+@keyframes rise {
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.intro-logo {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 60px;
+  height: 60px;
+  margin-bottom: 18px;
+  border-radius: 18px;
+  color: #ffffff;
+  background: var(--gradient-brand, linear-gradient(135deg, #7c6cff, #4fb6f0));
+  box-shadow: 0 10px 28px rgba(109, 94, 252, 0.35);
+}
+
+.intro-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 20px;
+  padding: 7px 16px;
+  border: 1px solid #e0dbfb;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.75);
+  backdrop-filter: blur(6px);
+  font-size: 13px;
+  font-weight: 600;
+  color: #4a3bd0;
+}
+
+/* 이퀄라이저 바 */
+.eq {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 14px;
+}
+
+.eq i {
+  display: block;
+  width: 3px;
+  height: 100%;
+  border-radius: 2px;
+  background: linear-gradient(180deg, #7c6cff, #4fb6f0);
+  transform-origin: bottom;
+  animation: eqBar 1s ease-in-out infinite;
+}
+
+.eq i:nth-child(2) {
+  animation-delay: -0.3s;
+}
+.eq i:nth-child(3) {
+  animation-delay: -0.6s;
+}
+.eq i:nth-child(4) {
+  animation-delay: -0.15s;
+}
+.eq i:nth-child(5) {
+  animation-delay: -0.45s;
+}
+
+@keyframes eqBar {
+  0%,
+  100% {
+    transform: scaleY(0.3);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+
+.intro-title {
+  margin: 0 0 16px;
+  font-size: clamp(32px, 5.4vw, 56px);
+  font-weight: 800;
+  line-height: 1.22;
+  letter-spacing: -0.03em;
+  color: #1e1b2e;
+}
+
+.intro-title-accent {
+  background: linear-gradient(90deg, #7c6cff, #f08ad8 55%, #4fb6f0);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.intro-desc {
+  max-width: 520px;
+  margin: 0 0 22px;
+  font-size: 15.5px;
+  line-height: 1.7;
+  color: #6f6c85;
+}
+
+.intro-flow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 6px 4px;
+  margin: 0 0 34px;
+  padding: 0;
+  list-style: none;
+}
+
+.intro-flow li {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.intro-flow-pill {
+  padding: 6px 14px;
+  border: 1px solid #e6e2f7;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.8);
+  font-size: 13px;
+  font-weight: 600;
+  color: #4a3bd0;
+}
+
+.intro-flow-arrow {
+  color: #b3aed6;
+  font-size: 14px;
+}
+
+.intro-ask {
+  margin: 0 0 14px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #1e1b2e;
+}
+
+.intro-start {
+  position: relative;
+  padding: 15px 44px;
+  border: none;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #7c6cff, #4fb6f0);
+  color: #ffffff;
+  font-family: inherit;
+  font-size: 16px;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: 0 10px 26px rgba(109, 94, 252, 0.4);
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.intro-start::after {
+  content: '';
+  position: absolute;
+  inset: -6px;
+  border-radius: 999px;
+  border: 2px solid rgba(124, 108, 255, 0.45);
+  animation: ring 2.2s ease-out infinite;
+  pointer-events: none;
+}
+
+@keyframes ring {
+  from {
+    opacity: 0.9;
+    transform: scale(0.96);
+  }
+  to {
+    opacity: 0;
+    transform: scale(1.16);
+  }
+}
+
+.intro-start:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 14px 30px rgba(109, 94, 252, 0.5);
+}
+
+/* 움직임 줄이기 설정을 켠 사용자 */
+@media (prefers-reduced-motion: reduce) {
+  .intro-blob,
+  .intro-beam,
+  .eq i,
+  .intro-start::after {
+    animation: none;
+  }
+
+  .rise {
+    opacity: 1;
+    transform: none;
+    animation: none;
+  }
+
+  .app-shell {
+    animation: none;
+  }
+}
