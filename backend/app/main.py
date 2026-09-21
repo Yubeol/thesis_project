@@ -9,6 +9,10 @@ from backend.app.api.health import (
     router as health_router,
 )
 
+from backend.app.api.download import (
+    router as download_router,
+)
+
 
 app = FastAPI(
     title="Paper Agent API",
@@ -35,4 +39,8 @@ app.include_router(
 
 app.include_router(
     generate_router
+)
+
+app.include_router(
+    download_router
 )

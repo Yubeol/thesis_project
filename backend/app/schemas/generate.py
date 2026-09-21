@@ -74,3 +74,9 @@ class GenerateResponse(BaseModel):
     )
 
     message: str | None = None
+
+class DownloadDocxRequest(BaseModel):
+    draft: DraftResponse
+    sources: list[SourceResponse] = Field(
+        default_factory=list
+    )
