@@ -127,13 +127,26 @@ def generate_paper(
         initial_retrieval
     )
 
+    # The local model has a 384-token input contract. Passing every result
+    # from every expanded query leaves only a few tokens per evidence item.
+    # Keep the complete lists for LLM2/LLM3, but give Transformer the most
+    # relevant bounded subset.
+    transformer_paper_evidence, transformer_news_evidence = (
+        build_evidence_lists(
+            initial_retrieval,
+            max_chars_per_item=1200,
+            max_papers=4,
+            max_news=2,
+        )
+    )
+
     # 3. Transformer
     draft = generate_transformer_draft(
         title=analysis.title,
         topic=analysis.topic,
         research_question=analysis.research_question,
-        paper_evidence=paper_evidence,
-        news_evidence=news_evidence,
+        paper_evidence=transformer_paper_evidence,
+        news_evidence=transformer_news_evidence,
         instruction=analysis.instruction,
     )
 

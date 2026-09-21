@@ -1,4 +1,31 @@
+import hashlib
+import json
+import os
+from pathlib import Path
+import warnings
+
 from transformer.inference import generate_draft
+
+from .grounded_fallback import replace_abstained_draft
+
+
+def _model_contract_matches() -> bool:
+    root = Path(__file__).resolve().parents[2]
+    model_path = Path(
+        os.getenv("TRANSFORMER_MODEL_PATH")
+        or root / "artifacts" / "transformer_model"
+    )
+    metadata_path = model_path / "training_metadata.json"
+    prompt_path = root / "transformer" / "preprocessing" / "prompts.py"
+
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        recorded = metadata["signature"]["code"]["preprocessing/prompts.py"]
+        current = hashlib.sha256(prompt_path.read_bytes()).hexdigest()
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return False
+
+    return recorded.casefold() == current.casefold()
 
 
 def generate_transformer_draft(
@@ -28,6 +55,26 @@ def generate_transformer_draft(
             "paper_evidence 또는 news_evidence가 필요합니다."
         )
 
+    contract_matches = _model_contract_matches()
+
+    if not contract_matches:
+        draft, _ = replace_abstained_draft(
+            "",
+            title=title,
+            topic=topic,
+            research_question=research_question,
+            paper_evidence=paper_evidence,
+            news_evidence=news_evidence,
+            force=True,
+        )
+        warnings.warn(
+            "Transformer model/code contract does not match; the stale "
+            "model was not executed and a grounded extractive fallback "
+            "draft was used.",
+            stacklevel=2,
+        )
+        return draft
+
     draft = generate_draft(
         title=title,
         topic=topic,
@@ -51,6 +98,22 @@ def generate_transformer_draft(
     if not draft:
         raise RuntimeError(
             "Transformer가 빈 초안을 반환했습니다."
+        )
+
+    draft, fallback_used = replace_abstained_draft(
+        draft,
+        title=title,
+        topic=topic,
+        research_question=research_question,
+        paper_evidence=paper_evidence,
+        news_evidence=news_evidence,
+    )
+
+    if fallback_used:
+        warnings.warn(
+            "Transformer output was malformed or unsupported; a grounded "
+            "extractive fallback draft was used.",
+            stacklevel=2,
         )
 
     return draft

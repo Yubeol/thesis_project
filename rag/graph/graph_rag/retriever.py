@@ -73,11 +73,13 @@ def search_related_papers(
     MATCH (seed:Paper)
     WHERE seed.paper_id IN $paper_ids
 
-    MATCH path = (seed)-[
-        r:CITES|RELATED_TO|HAS_TOPIC|HAS_KEYWORD
-    *1..2]-(related:Paper)
+    MATCH path = (seed)-[r*1..2]-(related:Paper)
 
     WHERE NOT related.paper_id IN $paper_ids
+      AND all(
+        rel IN relationships(path)
+        WHERE type(rel) IN $relationship_types
+      )
 
     WITH
         related,
@@ -101,6 +103,12 @@ def search_related_papers(
         query,
         paper_ids=paper_ids,
         limit=limit,
+        relationship_types=[
+            "CITES",
+            "RELATED_TO",
+            "HAS_TOPIC",
+            "HAS_KEYWORD",
+        ],
         database_=database,
     )
 

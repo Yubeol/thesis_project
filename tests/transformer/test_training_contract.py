@@ -69,7 +69,11 @@ def test_gpu_request_cannot_silently_fallback():
 def test_windows_workflow_contract():
     yaml = pytest.importorskip("yaml")
     root = Path(__file__).resolve().parents[2]
-    workflow = yaml.safe_load((root / ".github/workflows/train-transformer.yml").read_text())
+    workflow = yaml.safe_load(
+        (root / ".github/workflows/train-transformer.yml").read_text(
+            encoding="utf-8"
+        )
+    )
     train = workflow["jobs"]["train"]
     assert train["runs-on"] == ["self-hosted", "Windows", "X64", "gpu-train"]
     assert train["defaults"]["run"]["shell"] == "powershell"

@@ -71,6 +71,7 @@ def format_paper_evidence(
     papers: list[dict[str, Any]],
     *,
     max_chars_per_item: int = DEFAULT_MAX_CHARS_PER_ITEM,
+    max_items: int | None = None,
 ) -> list[str]:
     """
     Paper Vector + Graph RAG 검색 결과를
@@ -79,7 +80,16 @@ def format_paper_evidence(
 
     results: list[str] = []
 
-    for index, paper in enumerate(papers, start=1):
+    selected = sorted(
+        papers,
+        key=lambda item: float(item.get("similarity") or 0.0),
+        reverse=True,
+    )
+
+    if max_items is not None:
+        selected = selected[:max_items]
+
+    for index, paper in enumerate(selected, start=1):
         content = _clean_text(paper.get("content"))
 
         if not content:
@@ -134,6 +144,7 @@ def format_news_evidence(
     news_items: list[dict[str, Any]],
     *,
     max_chars_per_item: int = DEFAULT_MAX_CHARS_PER_ITEM,
+    max_items: int | None = None,
 ) -> list[str]:
     """
     News Vector RAG 검색 결과를
@@ -142,7 +153,16 @@ def format_news_evidence(
 
     results: list[str] = []
 
-    for index, news in enumerate(news_items, start=1):
+    selected = sorted(
+        news_items,
+        key=lambda item: float(item.get("similarity") or 0.0),
+        reverse=True,
+    )
+
+    if max_items is not None:
+        selected = selected[:max_items]
+
+    for index, news in enumerate(selected, start=1):
         content = _clean_text(news.get("content"))
 
         if not content:
@@ -198,6 +218,8 @@ def build_evidence_lists(
     retrieval_result: dict[str, Any],
     *,
     max_chars_per_item: int = DEFAULT_MAX_CHARS_PER_ITEM,
+    max_papers: int | None = None,
+    max_news: int | None = None,
 ) -> tuple[list[str], list[str]]:
     """
     retrieve_hybrid()의 반환값을 받아
@@ -213,11 +235,13 @@ def build_evidence_lists(
     paper_evidence = format_paper_evidence(
         retrieval_result.get("papers", []),
         max_chars_per_item=max_chars_per_item,
+        max_items=max_papers,
     )
 
     news_evidence = format_news_evidence(
         retrieval_result.get("news", []),
         max_chars_per_item=max_chars_per_item,
+        max_items=max_news,
     )
 
     return paper_evidence, news_evidence

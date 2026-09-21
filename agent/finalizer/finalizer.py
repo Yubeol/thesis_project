@@ -5,6 +5,7 @@ from openai import OpenAI
 
 from agent.prompts.finalizer import FINALIZER_SYSTEM_PROMPT
 from agent.schemas import GapAnalysis
+from agent.grounding import unsupported_numeric_claims
 
 
 def _format_evidence(
@@ -186,26 +187,66 @@ Do not invent new factual, commercial, causal, or future-oriented claims.
 Produce the final academic draft.
 """.strip()
 
-    response = client.chat.completions.create(
-        model=model,
-        temperature=0,
-        messages=[
-            {
-                "role": "system",
-                "content": FINALIZER_SYSTEM_PROMPT,
-            },
-            {
-                "role": "user",
-                "content": user_prompt,
-            },
-        ],
-    )
-
-    content = response.choices[0].message.content
-
-    if not content:
-        raise RuntimeError(
-            "Finalizer returned an empty response."
+    def request(prompt: str) -> str:
+        response = client.chat.completions.create(
+            model=model,
+            temperature=0,
+            messages=[
+                {
+                    "role": "system",
+                    "content": FINALIZER_SYSTEM_PROMPT,
+                },
+                {
+                    "role": "user",
+                    "content": prompt,
+                },
+            ],
         )
 
-    return content.strip()
+        content = response.choices[0].message.content
+
+        if not content:
+            raise RuntimeError(
+                "Finalizer returned an empty response."
+            )
+
+        return content.strip()
+
+    content = request(user_prompt)
+
+    unsupported = unsupported_numeric_claims(
+        content,
+        title=title,
+        topic=topic,
+        research_question=research_question,
+        paper_evidence=paper_evidence,
+        news_evidence=news_evidence,
+    )
+
+    if unsupported:
+        content = request(
+            user_prompt
+            + "\n\nCORRECTION REQUIRED:\n"
+            + "The previous draft introduced numeric values that do not "
+            + "appear in the supplied evidence: "
+            + ", ".join(unsupported)
+            + ". Remove those values and do not replace them with new "
+            + "numbers. Return the complete corrected draft."
+        )
+
+        unsupported = unsupported_numeric_claims(
+            content,
+            title=title,
+            topic=topic,
+            research_question=research_question,
+            paper_evidence=paper_evidence,
+            news_evidence=news_evidence,
+        )
+
+    if unsupported:
+        raise RuntimeError(
+            "Finalizer repeatedly produced unsupported numeric claims: "
+            + ", ".join(unsupported)
+        )
+
+    return content
