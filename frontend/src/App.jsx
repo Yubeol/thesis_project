@@ -5,9 +5,10 @@ import Sidebar from './components/Sidebar';
 import TopBar from './components/TopBar';
 import GenerateForm from './components/GenerateForm';
 import LoadingState from './components/LoadingState';
+import EmptyState from './components/EmptyState';
 import DraftResult from './components/DraftResult';
 import ErrorState from './components/ErrorState';
-import { FileIcon } from './components/Icons';
+import ScrollTopButton from './components/ScrollTopButton';
 import { generateDraft } from './api/generate';
 import './App.css';
 
@@ -175,15 +176,7 @@ export default function App() {
             </section>
 
             <main className="app-panel-right">
-              {status === 'idle' && (
-                <div className="placeholder">
-                  <span className="placeholder-icon">
-                    <FileIcon size={26} />
-                  </span>
-                  <p>왼쪽에 논문 제목을 입력하고 초안 생성을 눌러보세요.</p>
-                  <small>생성한 초안은 왼쪽 사이드바의 최근 기록에 저장됩니다.</small>
-                </div>
-              )}
+              {status === 'idle' && <EmptyState />}
               {status === 'loading' && <LoadingState />}
               {status === 'completed' && draft && <DraftResult draft={draft} />}
               {(status === 'abstained' || status === 'error') && (
@@ -193,6 +186,8 @@ export default function App() {
           </div>
         </div>
       </div>
+
+      <ScrollTopButton />
     </div>
   );
 }

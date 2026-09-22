@@ -1,0 +1,377 @@
+.visuals-section {
+  margin-top: 32px;
+  /* 창 폭이 아니라 이 섹션의 실제 폭을 기준으로 열 수를 바꾸기 위함 */
+  container-type: inline-size;
+}
+
+.visuals-header h3 {
+  margin: 0 0 4px;
+  font-size: 17px;
+  font-weight: 800;
+  color: #1f1d3a;
+}
+
+.visuals-header p {
+  margin: 0 0 16px;
+  font-size: 13px;
+  color: #8a88a6;
+}
+
+/* 2열 고정: 그래프가 읽힐 크기를 확보하고, JSX의 빈칸 채우기 로직과 맞춤 */
+.visuals-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.viz-card {
+  background: #fff;
+  border: 1px solid rgba(109, 94, 252, 0.14);
+  border-radius: 16px;
+  padding: 18px 18px 14px;
+  box-shadow: 0 6px 24px rgba(76, 64, 180, 0.06);
+  animation: viz-card-in 0.5s ease both;
+  min-width: 0;
+}
+
+.viz-card--wide {
+  grid-column: 1 / -1;
+}
+
+.viz-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.viz-kind {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: rgba(109, 94, 252, 0.1);
+  color: var(--color-accent, #6d5efc);
+}
+
+.viz-kind--line {
+  background: rgba(56, 189, 248, 0.12);
+  color: #0284c7;
+}
+
+.viz-kind--pie {
+  background: rgba(244, 114, 182, 0.12);
+  color: #db2777;
+}
+
+.viz-kind--table {
+  background: rgba(52, 211, 153, 0.14);
+  color: #059669;
+}
+
+.viz-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+  color: #1f1d3a;
+  line-height: 1.4;
+  min-width: 0;
+}
+
+.viz-unit {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-size: 11px;
+  color: #8a88a6;
+}
+
+.viz-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  overflow: visible;
+}
+
+.viz-grid {
+  stroke: rgba(31, 29, 58, 0.08);
+  stroke-dasharray: 3 4;
+}
+
+.viz-baseline {
+  stroke: rgba(31, 29, 58, 0.25);
+}
+
+.viz-axis-text {
+  font-size: 13px;
+  fill: #8a88a6;
+}
+
+.viz-value-text {
+  font-size: 13px;
+  font-weight: 700;
+  fill: #4a4870;
+  opacity: 0;
+  animation: viz-fade 0.4s ease forwards;
+}
+
+.viz-bar {
+  transform-box: fill-box;
+  transform-origin: 50% 100%;
+  animation: viz-bar-grow 0.7s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  transition: opacity 0.15s ease;
+}
+
+.viz-bar:hover {
+  opacity: 0.78;
+}
+
+.viz-line {
+  fill: none;
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  animation: viz-line-draw 1.1s ease forwards;
+}
+
+.viz-area {
+  opacity: 0;
+  animation: viz-fade 0.8s 0.5s ease forwards;
+}
+
+.viz-dot {
+  fill: #fff;
+  stroke-width: 2.5;
+  opacity: 0;
+  animation: viz-fade 0.3s ease forwards;
+  transition: r 0.15s ease;
+  cursor: default;
+}
+
+.viz-dot:hover {
+  r: 6;
+}
+
+.viz-pie-wrap {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+
+.viz-pie {
+  width: 180px;
+  flex-shrink: 0;
+}
+
+/* 한 줄 전체로 펼쳐진 카드: 그래프가 과하게 커지지 않게 높이 제한 */
+.viz-card--wide .viz-svg {
+  max-height: 300px;
+}
+
+/* 한 줄 전체로 펼쳐진 도넛: 도넛과 범례를 가운데로 모음 */
+.viz-card--wide .viz-pie-wrap {
+  justify-content: center;
+  gap: 48px;
+}
+
+.viz-card--wide .viz-legend--column {
+  flex: 0 1 340px;
+}
+
+.viz-pie-track {
+  fill: none;
+  stroke: rgba(109, 94, 252, 0.06);
+}
+
+.viz-slice {
+  fill: none;
+  opacity: 0;
+  animation: viz-fade 0.6s ease forwards;
+  transition: stroke-width 0.15s ease;
+}
+
+.viz-slice:hover {
+  stroke-width: 38;
+}
+
+.viz-pie-center-value {
+  font-size: 22px;
+  font-weight: 800;
+  fill: #1f1d3a;
+}
+
+.viz-pie-center-label {
+  font-size: 11px;
+  fill: #8a88a6;
+}
+
+.viz-legend {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  font-size: 12px;
+  color: #4a4870;
+}
+
+.viz-legend li {
+  display: flex;
+  align-items: center;
+}
+
+.viz-legend--column {
+  flex: 1;
+  min-width: 170px;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+}
+
+.viz-swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  margin-right: 7px;
+  flex-shrink: 0;
+}
+
+.viz-legend-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.viz-legend-value {
+  margin-left: auto;
+  padding-left: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.viz-table-wrap {
+  overflow-x: auto;
+  border-radius: 10px;
+  border: 1px solid rgba(109, 94, 252, 0.14);
+}
+
+.viz-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.viz-table th {
+  background: rgba(109, 94, 252, 0.07);
+  text-align: left;
+  padding: 10px 12px;
+  font-weight: 700;
+  color: #3b3870;
+  white-space: nowrap;
+}
+
+.viz-table td {
+  padding: 10px 12px;
+  border-top: 1px solid rgba(109, 94, 252, 0.1);
+  color: #3f3d5c;
+  line-height: 1.55;
+  vertical-align: top;
+}
+
+.viz-table tbody tr:hover {
+  background: rgba(109, 94, 252, 0.04);
+}
+
+.viz-source {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px dashed rgba(109, 94, 252, 0.18);
+  font-size: 12px;
+  color: #8a88a6;
+  min-width: 0;
+}
+
+.viz-source-tag {
+  flex-shrink: 0;
+  font-weight: 700;
+  color: #6b6890;
+}
+
+.viz-source a,
+.viz-source-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.viz-source a {
+  color: var(--color-accent, #6d5efc);
+  text-decoration: none;
+}
+
+.viz-source a:hover {
+  text-decoration: underline;
+}
+
+@keyframes viz-card-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes viz-bar-grow {
+  from {
+    transform: scaleY(0);
+  }
+  to {
+    transform: scaleY(1);
+  }
+}
+
+@keyframes viz-line-draw {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes viz-fade {
+  to {
+    opacity: 1;
+  }
+}
+
+/* 결과 패널이 좁아지면(모바일, 창 축소) 1열로 전환 */
+@container (max-width: 560px) {
+  .visuals-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .viz-card,
+  .viz-bar,
+  .viz-line,
+  .viz-area,
+  .viz-dot,
+  .viz-slice,
+  .viz-value-text {
+    animation: none;
+    opacity: 1;
+    stroke-dashoffset: 0;
+  }
+}

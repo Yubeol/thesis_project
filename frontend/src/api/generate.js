@@ -1,17 +1,21 @@
 // src/api/generate.js
 //
-// 백엔드 응답 형식(확정 전, 백앤드 담당자 수정 후 push 예정):
+// 백엔드 응답 형식:
 // {
 //   status: 'completed' | 'abstained',
 //   draft: { title, introduction, body, conclusion } | null,
 //   sources: [{ type: 'paper' | 'news', title, url }],
+//   visuals: [{ kind: 'line' | 'bar' | 'pie' | 'table', title, ... , source_index }],
 //   message: string | null
 // }
 //
-// 서버 응답의 sources는 draft 밖에 있지만, 화면 컴포넌트는 draft 하나만
-// 받도록 normalizeResponse에서 draft.sources로 합쳐서 넘깁니다.
+// 서버 응답의 sources와 visuals는 draft 밖에 있지만, 화면 컴포넌트는 draft 하나만
+// 받도록 normalizeResponse에서 draft.sources / draft.visuals로 합쳐서 넘깁니다.
 // 응답 형식이 바뀌면 이 파일의 normalizeResponse만 고치면 됩니다.
 
+import { MOCK_VISUALS } from './mockVisuals';
+
+// 디자인 작업 중에는 목업 사용. 실서버 테스트 시 false로 변경.
 const USE_MOCK = false;
 
 // 목업일 때 재현할 상황: 'completed' | 'abstained' | 'error'
@@ -40,6 +44,7 @@ async function mockGenerateDraft(titleKo) {
       status: 'abstained',
       draft: null,
       sources: [],
+      visuals: [],
       message: '입력하신 주제와 관련된 근거 자료를 충분히 찾지 못했습니다.',
     };
   }
@@ -48,8 +53,8 @@ async function mockGenerateDraft(titleKo) {
     status: 'completed',
     draft: {
       title: titleKo,
-      introduction: `(목업) "${titleKo}"에 대한 서론입니다. 문제와 배경을 다룹니다.`,
-      body: '(목업) 찾은 근거 자료와 모델이 작성한 내용을 종합한 본론입니다.',
+      introduction: `(목업) "${titleKo}"에 대한 서론입니다. 문제와 배경을 다룹니다.\n(목업) 두 번째 문단입니다. 연구의 범위와 쟁점을 좁혀 제시합니다.`,
+      body: '(목업) 찾은 근거 자료와 모델이 작성한 내용을 종합한 본론입니다.\n(목업) 근거 자료별 주장을 비교하고 쟁점을 분석하는 문단입니다.',
       conclusion: '(목업) 요약과 제안을 담은 결론입니다.',
     },
     sources: [
@@ -57,6 +62,7 @@ async function mockGenerateDraft(titleKo) {
       { type: 'paper', title: '(목업) 참고 논문 2', url: '#' },
       { type: 'news', title: '(목업) 참고 기사 1', url: '#' },
     ],
+    visuals: MOCK_VISUALS,
     message: null,
   };
 }
@@ -64,9 +70,18 @@ async function mockGenerateDraft(titleKo) {
 // 서버 응답 -> 화면에서 쓰는 형태로 변환
 function normalizeResponse(data) {
   const sources = Array.isArray(data.sources) ? data.sources : [];
+  const visuals = Array.isArray(data.visuals) ? data.visuals : [];
   return {
     status: data.status,
-    draft: data.draft ? { ...data.draft, sources } : null,
+    draft: data.draft
+      ? {
+          ...data.draft,
+          sources,
+          visuals,
+          // 논문 용지에 표시할 생성일. 기록 복원 시에도 원래 날짜가 유지됨
+          generatedAt: new Date().toISOString(),
+        }
+      : null,
     message: data.message ?? null,
   };
 }
