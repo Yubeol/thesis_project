@@ -20,6 +20,48 @@ VALID_KINDS = {
     "table",
 }
 
+VISUAL_EXTRACTION_INSTRUCTION = """
+가능한 경우 서로 다른 source_index를 사용하여
+2~3개의 독립적인 visual 후보를 반환하라.
+
+단, 근거가 부족한데 개수를 맞추기 위해
+억지로 visual을 만들면 안 된다.
+
+연구 주제와 직접 관련된 비교 가능한 수치가 존재하면
+정성적 table보다 line / bar / pie를 우선한다.
+
+하나의 후보가 부족하더라도
+다른 source에 유효한 데이터가 있다면
+전체 visuals를 빈 배열로 반환하지 않는다.
+""".strip()
+
+
+VISUAL_RETRY_INSTRUCTION = """
+이전 추출 결과에서 검증을 통과한 visual이 하나도 남지 않았다.
+
+동일한 source chunk를 다시 검토하라.
+검색이나 source를 변경하지 말고,
+현재 제공된 근거 안에서만 다시 추출한다.
+
+특히 다음 조건을 다시 확인한다.
+
+- 2개 이상의 항목과 직접 대응하는 수치 또는 순위
+- 2개 이상의 시점과 직접 대응하는 값
+- 동일한 전체를 구성하는 2개 이상의 명시적 비율
+- 수치화할 수 없지만 명시적으로 비교 가능한 2개 이상의 항목
+
+가능하면 서로 다른 source_index에서
+2~3개의 독립적인 visual 후보를 반환한다.
+
+수치 비교가 가능하면 table 대신 chart를 우선한다.
+
+그래도 충분한 근거가 없다면 반드시 다음을 반환한다.
+
+{
+  "visuals": []
+}
+""".strip()
+
 NUMBER_PATTERN = re.compile(
     r"[-+]?"
     r"(?:\d{1,3}(?:,\d{3})+|\d+)"
@@ -828,6 +870,77 @@ def _validate_visuals(
 
     return validated
 
+def _request_visuals(
+    *,
+    client: OpenAI,
+    model: str,
+    payload: dict[str, Any],
+    retry: bool = False,
+) -> list[dict[str, Any]]:
+    """
+    동일한 visual source를 사용하여
+    Visualization LLM에 시각화 후보를 요청한다.
+    """
+
+    messages = [
+        {
+            "role": "system",
+            "content": VISUALIZER_SYSTEM_PROMPT,
+        },
+        {
+            "role": "user",
+            "content": json.dumps(
+                payload,
+                ensure_ascii=False,
+            ),
+        },
+        {
+            "role": "user",
+            "content": VISUAL_EXTRACTION_INSTRUCTION,
+        },
+    ]
+
+    if retry:
+        messages.append(
+            {
+                "role": "user",
+                "content": VISUAL_RETRY_INSTRUCTION,
+            }
+        )
+
+    response = client.chat.completions.create(
+        model=model,
+        temperature=0,
+        response_format={
+            "type": "json_object",
+        },
+        messages=messages,
+    )
+
+    content = (
+        response
+        .choices[0]
+        .message
+        .content
+        or ""
+    )
+
+    parsed = _safe_json_loads(
+        content
+    )
+
+    visuals = parsed.get(
+        "visuals",
+        [],
+    )
+
+    if not isinstance(
+        visuals,
+        list,
+    ):
+        return []
+
+    return visuals
 
 def extract_visuals(
     *,
@@ -840,6 +953,10 @@ def extract_visuals(
     """
     검색된 실제 청크 원문을 별도 LLM에 전달해
     시각화용 JSON 데이터를 추출한다.
+
+    1차 추출 결과가 검증 후 모두 제거되면
+    동일한 visual source를 사용하여
+    Visualization 추출만 1회 재시도한다.
 
     실패하더라도 논문 생성에는 영향을 주지 않고
     빈 배열을 반환한다.
@@ -858,18 +975,12 @@ def extract_visuals(
 
         payload = {
             "question": {
-                "title":
-                    title,
-
-                "topic":
-                    topic,
-
+                "title": title,
+                "topic": topic,
                 "research_question":
                     research_question,
             },
-
-            "sources":
-                visual_sources,
+            "sources": visual_sources,
         }
 
         client = OpenAI(
@@ -888,66 +999,49 @@ def extract_visuals(
             or "gpt-4o-mini"
         )
 
-        response = (
-            client.chat.completions.create(
-                model=model,
-                temperature=0,
+        # -------------------------
+        # 1차 Visualization 추출
+        # -------------------------
 
-                response_format={
-                    "type":
-                        "json_object"
-                },
-
-                messages=[
-                    {
-                        "role":
-                            "system",
-
-                        "content":
-                            VISUALIZER_SYSTEM_PROMPT,
-                    },
-                    {
-                        "role":
-                            "user",
-
-                        "content":
-                            json.dumps(
-                                payload,
-                                ensure_ascii=False,
-                            ),
-                    },
-                ],
-            )
-        )
-
-        content = (
-            response
-            .choices[0]
-            .message
-            .content
-            or ""
-        )
-
-        parsed = (
-            _safe_json_loads(
-                content
-            )
+        raw_visuals = _request_visuals(
+            client=client,
+            model=model,
+            payload=payload,
+            retry=False,
         )
 
         validated = _validate_visuals(
-            raw_visuals=
-            parsed.get(
-                "visuals",
-                [],
-            ),
-            visual_sources=
-            visual_sources,
+            raw_visuals=raw_visuals,
+            visual_sources=visual_sources,
         )
 
-        return validated
+        if validated:
+            return validated
 
+        # -------------------------
+        # 1차 결과가 전부 검증 탈락한 경우
+        # 동일 source로 단 1회 재시도
+        # -------------------------
 
+        retry_raw_visuals = (
+            _request_visuals(
+                client=client,
+                model=model,
+                payload=payload,
+                retry=True,
+            )
+        )
+
+        retry_validated = (
+            _validate_visuals(
+                raw_visuals=
+                    retry_raw_visuals,
+                visual_sources=
+                    visual_sources,
+            )
+        )
+
+        return retry_validated
 
     except Exception:
-
         return []
