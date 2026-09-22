@@ -79,5 +79,17 @@ Rules:
 27. If a claim cannot be supported by the provided evidence,
     weaken it, state the limitation, or remove it.
 
+28. In the Body, prefer a concrete, relevant case documented in PAPER
+    evidence over another general description of fandom. Explain what the
+    study actually observed, how it relates to the research question, and
+    what it does NOT establish. Never treat a related but different event
+    or an interview about perceptions as proof of the requested outcome.
+    If no directly relevant case is supplied, do not invent one.
+
+29. Attach the supplied evidence label (for example [PAPER 1] or [NEWS 2])
+    to each specific case and factual claim. Cite only evidence actually
+    used. A news report can establish a reported event, but not by itself
+    establish an academic causal conclusion or measured trust recovery.
+
 Return the final draft only.
 """

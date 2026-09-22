@@ -1,5 +1,6 @@
 import json
 import os
+import re
 
 from openai import OpenAI
 
@@ -11,8 +12,9 @@ from agent.grounding import unsupported_numeric_claims
 def _format_evidence(
     evidence: list[str],
     *,
+    kind: str,
     max_items: int,
-    max_chars_per_item: int = 1200,
+    max_chars_per_item: int = 1800,
 ) -> str:
     if not evidence:
         return "(none)"
@@ -25,9 +27,11 @@ def _format_evidence(
         if len(text) > max_chars_per_item:
             text = text[:max_chars_per_item].rstrip() + "..."
 
-        formatted.append(
-            f"[{index}]\n{text}"
-        )
+        label = f"[{kind} {index}]"
+        if not re.match(rf"^\[{kind}\s+{index}\]", text, re.I):
+            text = f"{label}\n{text}"
+
+        formatted.append(text)
 
     return "\n\n".join(formatted)
 
@@ -100,11 +104,13 @@ def finalize_draft(
 
     paper_evidence_text = _format_evidence(
         paper_evidence,
+        kind="PAPER",
         max_items=15,
     )
 
     news_evidence_text = _format_evidence(
         news_evidence,
+        kind="NEWS",
         max_items=8,
     )
 
@@ -219,6 +225,12 @@ If OUTPUT LANGUAGE is Korean:
   Synthesize and compare multiple evidence items.
   Explain mechanisms, patterns, relationships, limitations,
   and contrasting evidence when supported.
+- In the Body, include a concrete case from a paper when one directly
+  addresses the research question. State the observed event or participants'
+  accounts, the study's finding, and the limit of that finding. Do not turn
+  a related but different event into evidence of the requested outcome.
+- If the supplied papers contain no directly relevant case, say so briefly
+  instead of inventing one or filling the space with repeated generalities.
 - 결론: directly answer the research question using only supported claims.
   Summarize the body and do not introduce new evidence.
 
@@ -231,6 +243,10 @@ QUALITY REQUIREMENT:
 - Clearly distinguish what the evidence supports from what remains uncertain.
 - Do not invent facts, numbers, names, citations, causal claims,
   commercial claims, or future predictions.
+- Add [PAPER n] or [NEWS n] immediately after each concrete case or factual
+  finding, using the exact label of the supporting evidence above. Do not
+  cite an item merely because it was retrieved. Preserve these labels in
+  the final draft so the reference list can identify actually used sources.
 
 REMINDER:
 Your final response MUST be written entirely in {output_language}.
