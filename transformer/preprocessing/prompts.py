@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import re
 
+# Shared-model compatibility uses an LF-normalized source hash. Keep the
+# executable prompt contract unchanged when adjusting checkout line endings.
+
 
 NO_NEWS = (
     "[NO_NEWS_EVIDENCE]"

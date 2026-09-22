@@ -9,6 +9,20 @@ from transformer.inference import generate_draft
 from .grounded_fallback import replace_abstained_draft
 
 
+_PROMPT_SIGNATURE_KEY = "preprocessing/prompts.py"
+_LEGACY_PROMPT_HASHES = {
+    # grounded_shared_v1 was trained from a checkout with mixed CRLF/LF.
+    # The executable prompt was identical to the repository version.
+    "67c5ca378b017d9a81ebce19b356e31bc972a06fcd9efc2c84d8281dd16d343c":
+        "4bb5822c0116c1469d5f9206c67d30a8c5e9ae59b18c75183386cf26ef178f64",
+}
+
+
+def _normalized_source_hash(path: Path) -> str:
+    source = path.read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    return hashlib.sha256(source).hexdigest()
+
+
 def _model_contract_matches() -> bool:
     root = Path(__file__).resolve().parents[2]
     model_path = Path(
@@ -20,12 +34,18 @@ def _model_contract_matches() -> bool:
 
     try:
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        recorded = metadata["signature"]["code"]["preprocessing/prompts.py"]
-        current = hashlib.sha256(prompt_path.read_bytes()).hexdigest()
+        signature = metadata["signature"]
+        recorded_raw = signature["code"][_PROMPT_SIGNATURE_KEY].casefold()
+        recorded_normalized = signature.get("code_normalized", {}).get(
+            _PROMPT_SIGNATURE_KEY
+        ) or _LEGACY_PROMPT_HASHES.get(recorded_raw)
+        if not recorded_normalized:
+            return False
+        current = _normalized_source_hash(prompt_path)
     except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
         return False
 
-    return recorded.casefold() == current.casefold()
+    return recorded_normalized.casefold() == current.casefold()
 
 
 def generate_transformer_draft(
