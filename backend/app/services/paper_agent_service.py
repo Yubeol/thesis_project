@@ -36,25 +36,71 @@ def _parse_final_draft(
 
     final_text = final_text.strip()
 
-    headings = list(SECTION_HEADING.finditer(final_text))
-    title_match = re.search(r"^#\s+(.+)$", final_text, flags=re.MULTILINE)
+    headings = list(
+        SECTION_HEADING.finditer(
+            final_text
+        )
+    )
+
+    title_match = re.search(
+        r"^#\s+(.+)$",
+        final_text,
+        flags=re.MULTILINE,
+    )
+
     title = fallback_title.strip()
-    if title_match and (not headings or title_match.start() < headings[0].start()):
+
+    if (
+        title_match
+        and (
+            not headings
+            or title_match.start()
+            < headings[0].start()
+        )
+    ):
         title = title_match.group(1).strip()
 
     sections: dict[str, str] = {}
-    for index, heading in enumerate(headings):
-        name = SECTION_NAMES[heading.group(1).casefold()]
+
+    for index, heading in enumerate(
+        headings
+    ):
+        name = SECTION_NAMES[
+            heading.group(1).casefold()
+        ]
+
         if name in sections:
             continue
-        end = headings[index + 1].start() if index + 1 < len(headings) else len(final_text)
-        sections[name] = final_text[heading.end():end].strip()
+
+        end = (
+            headings[index + 1].start()
+            if index + 1 < len(headings)
+            else len(final_text)
+        )
+
+        sections[name] = (
+            final_text[
+                heading.end():end
+            ].strip()
+        )
 
     draft = {
         "title": title,
-        "introduction": sections.get("introduction", ""),
-        "body": sections.get("body", ""),
-        "conclusion": sections.get("conclusion", ""),
+        "introduction":
+            sections.get(
+                "introduction",
+                "",
+            ),
+        "body":
+            sections.get(
+                "body",
+                "",
+            ),
+        "conclusion":
+            sections.get(
+                "conclusion",
+                "",
+            ),
     }
 
     missing_fields = [
@@ -97,12 +143,18 @@ def generate_paper(
         return {
             "status": "abstained",
             "draft": None,
+            "character_count": 0,
             "sources": [],
             "visuals": [],
             "message": (
-                    result.get("message")
-                    or result.get("rejection_reason")
-                    or "해당 주제는 현재 서비스에서 지원하지 않습니다."
+                result.get("message")
+                or result.get(
+                    "rejection_reason"
+                )
+                or (
+                    "해당 주제는 현재 서비스에서 "
+                    "지원하지 않습니다."
+                )
             ),
         }
 
@@ -131,14 +183,25 @@ def generate_paper(
             "최종 논문 결과가 없습니다."
         )
 
+    final_text = final_text.strip()
+
     draft = _parse_final_draft(
         final_text=final_text,
-        fallback_title=result.get("title") or title_ko,
+        fallback_title=(
+            result.get("title")
+            or title_ko
+        ),
+    )
+
+    character_count = len(
+        final_text
     )
 
     return {
         "status": "completed",
         "draft": draft,
+        "character_count":
+            character_count,
         "sources": result.get(
             "sources",
             [],
