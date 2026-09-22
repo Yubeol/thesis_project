@@ -153,3 +153,13 @@ class DownloadDocxRequest(BaseModel):
     ] = Field(
         default_factory=list
     )
+
+
+class DownloadPdfRequest(BaseModel):
+    draft: DraftResponse
+
+    sources: list[
+        SourceResponse
+    ] = Field(
+        default_factory=list
+    )
