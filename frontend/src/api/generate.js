@@ -15,7 +15,7 @@
 
 import { MOCK_VISUALS } from './mockVisuals';
 
-// DB 연결 확인 전까지는 목업으로 작업. 실서버 테스트 시 false로 변경.
+// 디자인 작업 중에는 목업 사용. 실서버 테스트 시 false로 변경.
 const USE_MOCK = true;
 
 // 목업일 때 재현할 상황: 'completed' | 'abstained' | 'error'
@@ -53,8 +53,8 @@ async function mockGenerateDraft(titleKo) {
     status: 'completed',
     draft: {
       title: titleKo,
-      introduction: `(목업) "${titleKo}"에 대한 서론입니다. 문제와 배경을 다룹니다.`,
-      body: '(목업) 찾은 근거 자료와 모델이 작성한 내용을 종합한 본론입니다.',
+      introduction: `(목업) "${titleKo}"에 대한 서론입니다. 문제와 배경을 다룹니다.\n(목업) 두 번째 문단입니다. 연구의 범위와 쟁점을 좁혀 제시합니다.`,
+      body: '(목업) 찾은 근거 자료와 모델이 작성한 내용을 종합한 본론입니다.\n(목업) 근거 자료별 주장을 비교하고 쟁점을 분석하는 문단입니다.',
       conclusion: '(목업) 요약과 제안을 담은 결론입니다.',
     },
     sources: [
@@ -73,7 +73,15 @@ function normalizeResponse(data) {
   const visuals = Array.isArray(data.visuals) ? data.visuals : [];
   return {
     status: data.status,
-    draft: data.draft ? { ...data.draft, sources, visuals } : null,
+    draft: data.draft
+      ? {
+          ...data.draft,
+          sources,
+          visuals,
+          // 논문 용지에 표시할 생성일. 기록 복원 시에도 원래 날짜가 유지됨
+          generatedAt: new Date().toISOString(),
+        }
+      : null,
     message: data.message ?? null,
   };
 }
