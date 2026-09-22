@@ -3,37 +3,21 @@ import re
 from agent import run_agent_pipeline
 
 
-def _extract_section(
-    text: str,
-    start_heading: str,
-    end_heading: str | None = None,
-) -> str:
-    """
-    Markdown 최종 논문에서 특정 섹션을 추출한다.
-    """
+SECTION_NAMES = {
+    "서론": "introduction",
+    "introduction": "introduction",
+    "본론": "body",
+    "body": "body",
+    "결론": "conclusion",
+    "conclusion": "conclusion",
+}
 
-    if end_heading:
-        pattern = (
-            rf"##\s*{re.escape(start_heading)}\s*"
-            rf"(.*?)"
-            rf"(?=##\s*{re.escape(end_heading)}|\Z)"
-        )
-    else:
-        pattern = (
-            rf"##\s*{re.escape(start_heading)}\s*"
-            rf"(.*)"
-        )
-
-    match = re.search(
-        pattern,
-        text,
-        flags=re.DOTALL | re.IGNORECASE,
-    )
-
-    if not match:
-        return ""
-
-    return match.group(1).strip()
+SECTION_HEADING = re.compile(
+    r"^[ \t]*(?:#{1,6}[ \t]*)?(?:\*\*)?"
+    r"(서론|본론|결론|Introduction|Body|Conclusion)"
+    r"(?:\*\*)?[ \t]*[:：]?[ \t]*$",
+    flags=re.MULTILINE | re.IGNORECASE,
+)
 
 
 def _parse_final_draft(
@@ -52,62 +36,25 @@ def _parse_final_draft(
 
     final_text = final_text.strip()
 
-    # 제목
-    title_match = re.search(
-        r"^#\s+(.+)$",
-        final_text,
-        flags=re.MULTILINE,
-    )
-
-    if title_match:
+    headings = list(SECTION_HEADING.finditer(final_text))
+    title_match = re.search(r"^#\s+(.+)$", final_text, flags=re.MULTILINE)
+    title = fallback_title.strip()
+    if title_match and (not headings or title_match.start() < headings[0].start()):
         title = title_match.group(1).strip()
-    else:
-        title = fallback_title.strip()
 
-    # 한국어 heading 우선
-    introduction = _extract_section(
-        final_text,
-        "서론",
-        "본론",
-    )
-
-    body = _extract_section(
-        final_text,
-        "본론",
-        "결론",
-    )
-
-    conclusion = _extract_section(
-        final_text,
-        "결론",
-    )
-
-    # 혹시 Finalizer가 영어 heading을 반환한 경우도 대응
-    if not introduction:
-        introduction = _extract_section(
-            final_text,
-            "Introduction",
-            "Body",
-        )
-
-    if not body:
-        body = _extract_section(
-            final_text,
-            "Body",
-            "Conclusion",
-        )
-
-    if not conclusion:
-        conclusion = _extract_section(
-            final_text,
-            "Conclusion",
-        )
+    sections: dict[str, str] = {}
+    for index, heading in enumerate(headings):
+        name = SECTION_NAMES[heading.group(1).casefold()]
+        if name in sections:
+            continue
+        end = headings[index + 1].start() if index + 1 < len(headings) else len(final_text)
+        sections[name] = final_text[heading.end():end].strip()
 
     draft = {
         "title": title,
-        "introduction": introduction,
-        "body": body,
-        "conclusion": conclusion,
+        "introduction": sections.get("introduction", ""),
+        "body": sections.get("body", ""),
+        "conclusion": sections.get("conclusion", ""),
     }
 
     missing_fields = [
@@ -185,7 +132,7 @@ def generate_paper(
 
     draft = _parse_final_draft(
         final_text=final_text,
-        fallback_title=title_ko,
+        fallback_title=result.get("title") or title_ko,
     )
 
     return {

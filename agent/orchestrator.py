@@ -57,7 +57,6 @@ def _split_korean_final_draft(
             "Finalizer 결과가 비어 있습니다."
         )
 
-    # Markdown 코드블록 제거
     cleaned = re.sub(
         r"^```(?:markdown|text)?\s*",
         "",
@@ -183,8 +182,9 @@ def _limit_korean_final_draft(
     final_text: str,
 ) -> str:
     """
-    한국어 최종 논문을
-    실제 화면 출력 기준 약 4500~4600자로 보정한다.
+    한국어 최종 논문이 최소 4500자 이상이 되도록 보정한다.
+
+    최대 글자 수는 제한하지 않는다.
 
     output_limiter는 내부적으로 title까지 포함해
     글자 수를 세기 때문에 여기서는 title을 빈 문자열로
@@ -197,7 +197,6 @@ def _limit_korean_final_draft(
         f"{research_question}"
     )
 
-    # 영어 결과에는 한국어 limiter를 적용하지 않는다.
     if not _contains_hangul(
         language_source
     ):
@@ -210,8 +209,6 @@ def _limit_korean_final_draft(
     )
 
     limiter_input = {
-        # 제목은 API에서 별도 필드로 전달되므로
-        # 최종 본문 글자 수 계산에서는 제외한다.
         "title": "",
 
         "introduction":
@@ -230,16 +227,10 @@ def _limit_korean_final_draft(
             ],
     }
 
-    # output_limiter의 combine 함수는
-    # 빈 title 뒤에 \n\n 두 글자를 포함한다.
-    #
-    # 그래서 최소값을 4502로 두면
-    # 실제 반환되는 본문은 최소 약 4500자가 된다.
     limited = (
         enforce_korean_char_limit(
             limiter_input,
             min_chars=4502,
-            max_chars=4600,
         )
     )
 
@@ -253,15 +244,10 @@ def _limit_korean_final_draft(
         final
     )
 
-    if not (
-        4500
-        <= final_length
-        <= 4600
-    ):
+    if final_length < 4500:
         raise RuntimeError(
             "최종 한국어 초안이 "
-            "4500~4600자 범위를 "
-            "충족하지 못했습니다: "
+            "4500자 이상이 아닙니다: "
             f"{final_length}자"
         )
 
@@ -354,10 +340,6 @@ def _build_sources(
         tuple[str, str]
     ] = set()
 
-    # -------------------------
-    # Papers
-    # -------------------------
-
     for paper in retrieval.get(
         "papers",
         [],
@@ -374,8 +356,6 @@ def _build_sources(
             or ""
         ).strip()
 
-        # source_url이 없으면
-        # DOI 링크 사용
         if not url:
             doi = str(
                 paper.get("doi")
@@ -435,10 +415,6 @@ def _build_sources(
                     url,
             }
         )
-
-    # -------------------------
-    # News
-    # -------------------------
 
     for news in retrieval.get(
         "news",
@@ -514,12 +490,8 @@ def generate_paper(
     → LLM2 Gap Analyzer
     → 필요 시 2차 Hybrid RAG
     → LLM3 Finalizer
-    → 한국어 4500~4600자 보정
+    → 한국어 최소 4500자 보정
     """
-
-    # -------------------------
-    # 1. LLM1
-    # -------------------------
 
     analysis = analyze_query(
         title=title,
@@ -529,7 +501,6 @@ def generate_paper(
         instruction=instruction,
     )
 
-    # 범위 밖 주제는 즉시 종료
     if not analysis.allowed:
         return {
             "allowed": False,
@@ -563,10 +534,6 @@ def generate_paper(
             "retrieval_debug": {},
         }
 
-    # -------------------------
-    # 2. 1차 Hybrid RAG
-    # -------------------------
-
     initial_retrieval = (
         retrieve_hybrid(
             paper_queries=
@@ -588,9 +555,6 @@ def generate_paper(
         )
     )
 
-    # Transformer는 384-token input contract를 사용한다.
-    # 전체 검색 결과를 모두 넣으면 Evidence 본문이
-    # 거의 사라질 수 있으므로 가장 관련성 높은 일부만 사용한다.
     transformer_paper_evidence, \
         transformer_news_evidence = (
             build_evidence_lists(
@@ -603,10 +567,6 @@ def generate_paper(
                 max_news=2,
             )
         )
-
-    # -------------------------
-    # 3. Transformer
-    # -------------------------
 
     draft = (
         generate_transformer_draft(
@@ -630,10 +590,6 @@ def generate_paper(
         )
     )
 
-    # -------------------------
-    # 4. LLM2 Gap Analyzer
-    # -------------------------
-
     gap_analysis = analyze_gaps(
         title=
             analysis.title,
@@ -652,10 +608,6 @@ def generate_paper(
         news_evidence=
             news_evidence,
     )
-
-    # -------------------------
-    # 5. Adaptive RAG
-    # -------------------------
 
     adaptive_result = (
         run_adaptive_retrieval(
@@ -686,10 +638,6 @@ def generate_paper(
             )
         )
 
-    # -------------------------
-    # 6. LLM3 Finalizer
-    # -------------------------
-
     final = finalize_draft(
         title=
             analysis.title,
@@ -713,10 +661,6 @@ def generate_paper(
             final_news_evidence,
     )
 
-    # -------------------------
-    # 7. 한국어 글자 수 보정
-    # -------------------------
-
     final = (
         _limit_korean_final_draft(
             title=
@@ -732,10 +676,6 @@ def generate_paper(
                 final,
         )
     )
-
-    # -------------------------
-    # 8. 반환
-    # -------------------------
 
     return {
         "allowed": True,
