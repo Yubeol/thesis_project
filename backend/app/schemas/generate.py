@@ -1,10 +1,6 @@
-from typing import Literal
+from typing import Annotated, Literal, TypeAlias
 
-from pydantic import (
-    BaseModel,
-    Field,
-    field_validator,
-)
+from pydantic import BaseModel, Field, field_validator
 
 
 class GenerateRequest(BaseModel):
@@ -21,7 +17,7 @@ class GenerateRequest(BaseModel):
 
     @field_validator("title_ko")
     @classmethod
-    def validate_title(
+    def validate_title_ko(
         cls,
         value: str,
     ) -> str:
@@ -36,7 +32,7 @@ class GenerateRequest(BaseModel):
 
     @field_validator("topic_ko")
     @classmethod
-    def validate_topic(
+    def validate_topic_ko(
         cls,
         value: str | None,
     ) -> str | None:
@@ -63,7 +59,63 @@ class SourceResponse(BaseModel):
 
     title: str
     url: str
-    score: float | None = None
+
+
+class VisualSeriesResponse(BaseModel):
+    name: str
+
+    values: list[
+        int | float
+    ]
+
+
+class ChartVisualResponse(BaseModel):
+    kind: Literal[
+        "line",
+        "bar",
+        "pie",
+    ]
+
+    title: str
+
+    labels: list[str]
+
+    series: list[
+        VisualSeriesResponse
+    ]
+
+    unit: str | None = None
+
+    source_index: int = Field(
+        ...,
+        ge=0,
+    )
+
+
+class TableVisualResponse(BaseModel):
+    kind: Literal[
+        "table",
+    ]
+
+    title: str
+
+    columns: list[str]
+
+    rows: list[
+        list[str]
+    ]
+
+    source_index: int = Field(
+        ...,
+        ge=0,
+    )
+
+
+VisualResponse: TypeAlias = Annotated[
+    ChartVisualResponse
+    | TableVisualResponse,
+    Field(discriminator="kind"),
+]
 
 class GenerateResponse(BaseModel):
     status: Literal[
@@ -78,7 +130,15 @@ class GenerateResponse(BaseModel):
         ge=0,
     )
 
-    sources: list[SourceResponse] = Field(
+    sources: list[
+        SourceResponse
+    ] = Field(
+        default_factory=list
+    )
+
+    visuals: list[
+        VisualResponse
+    ] = Field(
         default_factory=list
     )
 
@@ -88,6 +148,8 @@ class GenerateResponse(BaseModel):
 class DownloadDocxRequest(BaseModel):
     draft: DraftResponse
 
-    sources: list[SourceResponse] = Field(
+    sources: list[
+        SourceResponse
+    ] = Field(
         default_factory=list
     )

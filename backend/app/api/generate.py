@@ -1,4 +1,5 @@
 import logging
+import traceback
 
 from fastapi import (
     APIRouter,
@@ -43,15 +44,13 @@ def generate_paper_endpoint(
             detail=str(exc),
         ) from exc
 
+
     except Exception as exc:
-        logger.exception(
-            "논문 생성 중 오류 발생"
-        )
 
         raise HTTPException(
+
             status_code=500,
-            detail=(
-                "논문 생성 중 내부 오류가 "
-                "발생했습니다."
-            ),
-        ) from exc
+
+            detail=f"논문 생성 중 내부 오류가 발생했습니다: {type(exc).__name__}: {exc}",
+
+        )

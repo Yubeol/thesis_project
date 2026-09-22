@@ -98,6 +98,7 @@ def generate_paper(
             "status": "abstained",
             "draft": None,
             "sources": [],
+            "visuals": [],
             "message": (
                     result.get("message")
                     or result.get("rejection_reason")
@@ -140,6 +141,10 @@ def generate_paper(
         "draft": draft,
         "sources": result.get(
             "sources",
+            [],
+        ),
+        "visuals": result.get(
+            "visuals",
             [],
         ),
         "message": None,

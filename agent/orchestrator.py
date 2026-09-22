@@ -10,6 +10,7 @@ from agent.adaptive_rag import (
     run_adaptive_retrieval,
 )
 from agent.finalizer import finalize_draft
+from agent.visualizer import extract_visuals
 from agent.finalizer.output_limiter import (
     enforce_korean_char_limit,
 )
@@ -326,41 +327,58 @@ def run_retrieval_pipeline(
 
 def _build_sources(
     retrieval: dict[str, Any],
-) -> list[dict[str, Any]]:
+) -> list[dict[str, str]]:
     """
     최종 RAG 검색 결과에서
     Frontend에 노출할 근거 목록을 생성한다.
     """
 
-    sources: list[dict[str, Any]] = []
-    seen: set[tuple[str, str]] = set()
+    sources: list[
+        dict[str, str]
+    ] = []
+
+    seen: set[
+        tuple[str, str]
+    ] = set()
 
     # -------------------------
     # Papers
     # -------------------------
 
-    for paper in retrieval.get("papers", []):
+    for paper in retrieval.get(
+        "papers",
+        [],
+    ):
         title = str(
             paper.get("title") or ""
         ).strip()
 
         url = str(
-            paper.get("source_url") or ""
+            paper.get(
+                "source_url"
+            )
+            or ""
         ).strip()
 
-        # source_url이 없으면 DOI 링크 사용
         if not url:
             doi = str(
                 paper.get("doi") or ""
             ).strip()
 
             if doi:
-                doi = doi.removeprefix(
-                    "doi:"
-                ).strip()
+                doi = (
+                    doi
+                    .removeprefix(
+                        "doi:"
+                    )
+                    .strip()
+                )
 
                 if doi.startswith(
-                    ("http://", "https://")
+                    (
+                        "http://",
+                        "https://",
+                    )
                 ):
                     url = doi
                 else:
@@ -379,27 +397,20 @@ def _build_sources(
         if key in seen:
             continue
 
-        seen.add(key)
-
-        similarity = paper.get(
-            "similarity"
-        )
-
-        score = (
-            round(float(similarity), 4)
-            if isinstance(
-                similarity,
-                (int, float),
-            )
-            else None
+        seen.add(
+            key
         )
 
         sources.append(
             {
-                "type": "paper",
-                "title": title,
-                "url": url,
-                "score": score,
+                "type":
+                    "paper",
+
+                "title":
+                    title,
+
+                "url":
+                    url,
             }
         )
 
@@ -407,11 +418,20 @@ def _build_sources(
     # News
     # -------------------------
 
-    for news in retrieval.get("news", []):
+    for news in retrieval.get(
+        "news",
+        [],
+    ):
         title = str(
-            news.get("title_original")
-            or news.get("title_en")
-            or news.get("title")
+            news.get(
+                "title_original"
+            )
+            or news.get(
+                "title_en"
+            )
+            or news.get(
+                "title"
+            )
             or ""
         ).strip()
 
@@ -430,32 +450,24 @@ def _build_sources(
         if key in seen:
             continue
 
-        seen.add(key)
-
-        similarity = news.get(
-            "similarity"
-        )
-
-        score = (
-            round(float(similarity), 4)
-            if isinstance(
-                similarity,
-                (int, float),
-            )
-            else None
+        seen.add(
+            key
         )
 
         sources.append(
             {
-                "type": "news",
-                "title": title,
-                "url": url,
-                "score": score,
+                "type":
+                    "news",
+
+                "title":
+                    title,
+
+                "url":
+                    url,
             }
         )
 
     return sources
-
 
 def generate_paper(
     *,
@@ -490,6 +502,7 @@ def generate_paper(
         return {
             "allowed": False,
             "sources": [],
+            "visuals": [],
             "rejection_reason":
                 analysis.rejection_reason,
 
@@ -662,6 +675,27 @@ def generate_paper(
         )
     )
 
+    sources = _build_sources(
+        final_retrieval
+    )
+
+    visuals = extract_visuals(
+        title=
+        analysis.title,
+
+        topic=
+        analysis.topic,
+
+        research_question=
+        analysis.research_question,
+
+        retrieval=
+        final_retrieval,
+
+        sources=
+        sources,
+    )
+
     return {
         "allowed": True,
         "rejection_reason": None,
@@ -682,9 +716,10 @@ def generate_paper(
             final,
 
         "sources":
-            _build_sources(
-                final_retrieval
-            ),
+            sources,
+
+        "visuals":
+            visuals,
 
         "gap_analysis":
             gap_analysis.model_dump(),
