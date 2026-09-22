@@ -326,69 +326,49 @@ def run_retrieval_pipeline(
 
 def _build_sources(
     retrieval: dict[str, Any],
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     """
     최종 RAG 검색 결과에서
     Frontend에 노출할 근거 목록을 생성한다.
     """
 
-    sources: list[
-        dict[str, str]
-    ] = []
+    sources: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
 
-    seen: set[
-        tuple[str, str]
-    ] = set()
+    # -------------------------
+    # Papers
+    # -------------------------
 
-    for paper in retrieval.get(
-        "papers",
-        [],
-    ):
+    for paper in retrieval.get("papers", []):
         title = str(
-            paper.get("title")
-            or ""
+            paper.get("title") or ""
         ).strip()
 
         url = str(
-            paper.get(
-                "source_url"
-            )
-            or ""
+            paper.get("source_url") or ""
         ).strip()
 
+        # source_url이 없으면 DOI 링크 사용
         if not url:
             doi = str(
-                paper.get("doi")
-                or ""
+                paper.get("doi") or ""
             ).strip()
 
             if doi:
-                doi = (
-                    doi
-                    .removeprefix(
-                        "doi:"
-                    )
-                    .strip()
-                )
+                doi = doi.removeprefix(
+                    "doi:"
+                ).strip()
 
                 if doi.startswith(
-                    (
-                        "http://",
-                        "https://",
-                    )
+                    ("http://", "https://")
                 ):
                     url = doi
-
                 else:
                     url = (
-                        "https://doi.org/"
-                        f"{doi}"
+                        f"https://doi.org/{doi}"
                     )
 
-        if (
-            not title
-            or not url
-        ):
+        if not title or not url:
             continue
 
         key = (
@@ -399,49 +379,47 @@ def _build_sources(
         if key in seen:
             continue
 
-        seen.add(
-            key
+        seen.add(key)
+
+        similarity = paper.get(
+            "similarity"
+        )
+
+        score = (
+            round(float(similarity), 4)
+            if isinstance(
+                similarity,
+                (int, float),
+            )
+            else None
         )
 
         sources.append(
             {
-                "type":
-                    "paper",
-
-                "title":
-                    title,
-
-                "url":
-                    url,
+                "type": "paper",
+                "title": title,
+                "url": url,
+                "score": score,
             }
         )
 
-    for news in retrieval.get(
-        "news",
-        [],
-    ):
+    # -------------------------
+    # News
+    # -------------------------
+
+    for news in retrieval.get("news", []):
         title = str(
-            news.get(
-                "title_original"
-            )
-            or news.get(
-                "title_en"
-            )
-            or news.get(
-                "title"
-            )
+            news.get("title_original")
+            or news.get("title_en")
+            or news.get("title")
             or ""
         ).strip()
 
         url = str(
-            news.get("url")
-            or ""
+            news.get("url") or ""
         ).strip()
 
-        if (
-            not title
-            or not url
-        ):
+        if not title or not url:
             continue
 
         key = (
@@ -452,20 +430,27 @@ def _build_sources(
         if key in seen:
             continue
 
-        seen.add(
-            key
+        seen.add(key)
+
+        similarity = news.get(
+            "similarity"
+        )
+
+        score = (
+            round(float(similarity), 4)
+            if isinstance(
+                similarity,
+                (int, float),
+            )
+            else None
         )
 
         sources.append(
             {
-                "type":
-                    "news",
-
-                "title":
-                    title,
-
-                "url":
-                    url,
+                "type": "news",
+                "title": title,
+                "url": url,
+                "score": score,
             }
         )
 
