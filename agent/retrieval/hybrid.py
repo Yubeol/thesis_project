@@ -81,6 +81,36 @@ def _deduplicate_items(
     return results
 
 
+def _rank_paper_passages(
+    papers: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Keep the strongest passage from each paper ahead of repeated chunks.
+
+    This improves source diversity without treating a keyword match as proof
+    that a passage describes a real case. Case relevance is decided against
+    the research question by the finalizer, not by this ordering heuristic.
+    """
+    ranked = sorted(
+        papers,
+        key=lambda item: float(item.get("similarity") or 0.0),
+        reverse=True,
+    )
+    first_by_paper: list[dict[str, Any]] = []
+    remaining: list[dict[str, Any]] = []
+    seen_papers: set[str] = set()
+
+    for item in ranked:
+        paper_id = item.get("paper_id")
+        key = str(paper_id) if paper_id is not None else str(item.get("chunk_id"))
+        if key in seen_papers:
+            remaining.append(item)
+        else:
+            seen_papers.add(key)
+            first_by_paper.append(item)
+
+    return first_by_paper + remaining
+
+
 def retrieve_hybrid(
     *,
     paper_queries: list[str],
@@ -217,9 +247,11 @@ def retrieve_hybrid(
     # 3. Vector + Graph Paper 결과 병합
     # ---------------------------------------------------------
 
-    papers = _deduplicate_items(
-        vector_papers + graph_papers,
-        id_keys=("chunk_id",),
+    papers = _rank_paper_passages(
+        _deduplicate_items(
+            vector_papers + graph_papers,
+            id_keys=("chunk_id",),
+        )
     )
 
     # ---------------------------------------------------------
@@ -241,6 +273,10 @@ def retrieve_hybrid(
             "news_id",
             "article_id",
         ),
+    )
+    news_results.sort(
+        key=lambda item: float(item.get("similarity") or 0.0),
+        reverse=True,
     )
 
     return {

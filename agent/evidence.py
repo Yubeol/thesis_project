@@ -80,20 +80,18 @@ def format_paper_evidence(
 
     results: list[str] = []
 
-    selected = sorted(
-        papers,
-        key=lambda item: float(item.get("similarity") or 0.0),
-        reverse=True,
-    )
-
-    if max_items is not None:
-        selected = selected[:max_items]
-
-    for index, paper in enumerate(selected, start=1):
+    # Hybrid retrieval already orders passages by relevance and paper diversity.
+    # Number only usable passages so [PAPER n] matches the source index.
+    for paper in papers:
         content = _clean_text(paper.get("content"))
 
         if not content:
             continue
+
+        if max_items is not None and len(results) >= max_items:
+            break
+
+        index = len(results) + 1
 
         content = _truncate(
             content,
@@ -105,6 +103,8 @@ def format_paper_evidence(
         year = _clean_text(paper.get("published_year"))
         source = _clean_text(paper.get("source"))
         doi = _clean_text(paper.get("doi"))
+        url = _clean_text(paper.get("source_url"))
+        section = _clean_text(paper.get("section"))
 
         similarity = paper.get("similarity")
 
@@ -124,6 +124,12 @@ def format_paper_evidence(
 
         if doi:
             lines.append(f"DOI: {doi}")
+
+        if url:
+            lines.append(f"URL: {url}")
+
+        if section:
+            lines.append(f"Section: {section}")
 
         if isinstance(similarity, (int, float)):
             lines.append(f"Similarity: {similarity:.4f}")
@@ -153,20 +159,16 @@ def format_news_evidence(
 
     results: list[str] = []
 
-    selected = sorted(
-        news_items,
-        key=lambda item: float(item.get("similarity") or 0.0),
-        reverse=True,
-    )
-
-    if max_items is not None:
-        selected = selected[:max_items]
-
-    for index, news in enumerate(selected, start=1):
+    for news in news_items:
         content = _clean_text(news.get("content"))
 
         if not content:
             continue
+
+        if max_items is not None and len(results) >= max_items:
+            break
+
+        index = len(results) + 1
 
         content = _truncate(
             content,

@@ -327,10 +327,13 @@ def run_retrieval_pipeline(
 
 def _build_sources(
     retrieval: dict[str, Any],
+    *,
+    cited_text: str = "",
 ) -> list[dict[str, str]]:
     """
-    최종 RAG 검색 결과에서
-    Frontend에 노출할 근거 목록을 생성한다.
+    최종 RAG 검색 결과에서 Frontend에 노출할 근거 목록을 생성한다.
+    최종 글에 [PAPER n]/[NEWS n] 인용이 있으면 실제 인용된 항목만
+    노출한다. 구형 출력에 인용 표지가 없으면 기존 목록 동작을 유지한다.
     """
 
     sources: list[
@@ -341,14 +344,42 @@ def _build_sources(
         tuple[str, str]
     ] = set()
 
+    citations = {
+        (kind.upper(), int(index))
+        for kind, index in re.findall(
+            r"\[\s*(PAPER|NEWS)\s+(\d+)\s*\]",
+            cited_text,
+            flags=re.I,
+        )
+    }
+
+    papers = retrieval.get("papers", [])
+    news_items = retrieval.get("news", [])
+
+    if citations:
+        # Evidence labels are assigned only to passages with body text.
+        papers = [
+            item
+            for index, item in enumerate(
+                (paper for paper in papers if str(paper.get("content") or "").strip()),
+                start=1,
+            )
+            if ("PAPER", index) in citations
+        ]
+        news_items = [
+            item
+            for index, item in enumerate(
+                (news for news in news_items if str(news.get("content") or "").strip()),
+                start=1,
+            )
+            if ("NEWS", index) in citations
+        ]
+
     # -------------------------
     # Papers
     # -------------------------
 
-    for paper in retrieval.get(
-        "papers",
-        [],
-    ):
+    for paper in papers:
         title = str(
             paper.get("title") or ""
         ).strip()
@@ -418,10 +449,7 @@ def _build_sources(
     # News
     # -------------------------
 
-    for news in retrieval.get(
-        "news",
-        [],
-    ):
+    for news in news_items:
         title = str(
             news.get(
                 "title_original"
@@ -676,7 +704,8 @@ def generate_paper(
     )
 
     sources = _build_sources(
-        final_retrieval
+        final_retrieval,
+        cited_text=final,
     )
 
     visuals = extract_visuals(
