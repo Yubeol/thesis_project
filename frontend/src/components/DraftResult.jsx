@@ -2,6 +2,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { CopyIcon, DownloadIcon, CheckIcon } from './Icons';
 import VisualsSection from './VisualsSection';
+import { downloadPdf } from '../api/download';
 import './DraftResult.css';
 
 // 다운로드/복사 파일 안에 들어가는 팀 정보. 팀명이 바뀌면 이 한 줄만 고치세요.
@@ -148,7 +149,7 @@ function buildPlainText(draft) {
   return lines.join('\n');
 }
 
-// 형식별 설정. Word(.docx)는 백엔드 API 명세가 나오면 여기에 추가합니다.
+// 브라우저에서 바로 저장하는 텍스트 형식. PDF는 백엔드에서 생성합니다.
 const DOWNLOAD_FORMATS = [
   {
     id: 'txt',
@@ -171,6 +172,8 @@ const DOWNLOAD_FORMATS = [
 export default function DraftResult({ draft }) {
   const [copyState, setCopyState] = useState('idle'); // idle | done | fail
   const [menuOpen, setMenuOpen] = useState(false);
+  const [pdfDownloading, setPdfDownloading] = useState(false);
+  const [pdfError, setPdfError] = useState(false);
   const [layout, setLayout] = useState(null); // { blocks, pages }
   const [pageWidth, setPageWidth] = useState(0);
   const [fontsVersion, setFontsVersion] = useState(0);
@@ -293,12 +296,36 @@ export default function DraftResult({ draft }) {
     setMenuOpen(false);
   }
 
+  async function handlePdfDownload() {
+    setMenuOpen(false);
+    setPdfDownloading(true);
+    setPdfError(false);
+
+    try {
+      const blob = await downloadPdf(draft);
+      const href = URL.createObjectURL(blob);
+      const safeName =
+        draft.title.replace(/[\\/:*?"<>|]/g, '').trim().slice(0, 60) || '논문초안';
+      const link = document.createElement('a');
+      link.href = href;
+      link.download = `${safeName}_teamC.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(href), 1000);
+    } catch {
+      setPdfError(true);
+    } finally {
+      setPdfDownloading(false);
+    }
+  }
+
   function renderBlock(block) {
     switch (block.type) {
       case 'front':
         return (
           <div className="paper-front">
-            <p className="paper-kicker">연예 · 문화 분야 연구 초안</p>
+            <p className="paper-kicker">소셜미디어 기반 글로벌 팬덤 활동이 K-POP의 세계적 확산에 미치는 영향</p>
             <h1 className="paper-title">{draft.title}</h1>
             <p className="paper-authors">{TEAM_NAME}</p>
             {dateText && <p className="paper-date">{dateText}</p>}
@@ -353,6 +380,7 @@ export default function DraftResult({ draft }) {
             본문 {charCount.toLocaleString('ko-KR')}자 · 근거 {sources.length}개
             {pages ? ` · 총 ${pages.length}쪽` : ''}
           </span>
+          {pdfError && <span className="draft-meta" role="alert">PDF 다운로드에 실패했습니다. 백엔드를 확인해주세요.</span>}
         </div>
 
         <div className="draft-actions">
@@ -388,6 +416,20 @@ export default function DraftResult({ draft }) {
                     </button>
                   </li>
                 ))}
+                <li role="none">
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="download-item"
+                    disabled={pdfDownloading}
+                    onClick={handlePdfDownload}
+                  >
+                    <span className="download-item-label">PDF (.pdf)</span>
+                    <span className="download-item-hint">
+                      {pdfDownloading ? '생성 중...' : '서론·본론·결론과 근거 자료'}
+                    </span>
+                  </button>
+                </li>
                 <li role="none">
                   <button type="button" role="menuitem" className="download-item" disabled>
                     <span className="download-item-label">Word (.docx)</span>
