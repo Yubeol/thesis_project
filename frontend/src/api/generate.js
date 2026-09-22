@@ -1,18 +1,22 @@
 // src/api/generate.js
 //
-// 백엔드 응답 형식(확정 전, 백앤드 담당자 수정 후 push 예정):
+// 백엔드 응답 형식:
 // {
 //   status: 'completed' | 'abstained',
 //   draft: { title, introduction, body, conclusion } | null,
 //   sources: [{ type: 'paper' | 'news', title, url }],
+//   visuals: [{ kind: 'line' | 'bar' | 'pie' | 'table', title, ... , source_index }],
 //   message: string | null
 // }
 //
-// 서버 응답의 sources는 draft 밖에 있지만, 화면 컴포넌트는 draft 하나만
-// 받도록 normalizeResponse에서 draft.sources로 합쳐서 넘깁니다.
+// 서버 응답의 sources와 visuals는 draft 밖에 있지만, 화면 컴포넌트는 draft 하나만
+// 받도록 normalizeResponse에서 draft.sources / draft.visuals로 합쳐서 넘깁니다.
 // 응답 형식이 바뀌면 이 파일의 normalizeResponse만 고치면 됩니다.
 
-const USE_MOCK = false;
+import { MOCK_VISUALS } from './mockVisuals';
+
+// DB 연결 확인 전까지는 목업으로 작업. 실서버 테스트 시 false로 변경.
+const USE_MOCK = true;
 
 // 목업일 때 재현할 상황: 'completed' | 'abstained' | 'error'
 const MOCK_SCENARIO = 'completed'; // 'completed' | 'abstained' | 'error'
@@ -40,6 +44,7 @@ async function mockGenerateDraft(titleKo) {
       status: 'abstained',
       draft: null,
       sources: [],
+      visuals: [],
       message: '입력하신 주제와 관련된 근거 자료를 충분히 찾지 못했습니다.',
     };
   }
@@ -57,6 +62,7 @@ async function mockGenerateDraft(titleKo) {
       { type: 'paper', title: '(목업) 참고 논문 2', url: '#' },
       { type: 'news', title: '(목업) 참고 기사 1', url: '#' },
     ],
+    visuals: MOCK_VISUALS,
     message: null,
   };
 }
@@ -64,9 +70,10 @@ async function mockGenerateDraft(titleKo) {
 // 서버 응답 -> 화면에서 쓰는 형태로 변환
 function normalizeResponse(data) {
   const sources = Array.isArray(data.sources) ? data.sources : [];
+  const visuals = Array.isArray(data.visuals) ? data.visuals : [];
   return {
     status: data.status,
-    draft: data.draft ? { ...data.draft, sources } : null,
+    draft: data.draft ? { ...data.draft, sources, visuals } : null,
     message: data.message ?? null,
   };
 }

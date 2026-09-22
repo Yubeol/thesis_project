@@ -1,6 +1,7 @@
 // src/components/DraftResult.jsx
 import { useEffect, useRef, useState } from 'react';
 import { CopyIcon, DownloadIcon, CheckIcon } from './Icons';
+import VisualsSection from './VisualsSection';
 
 // 다운로드/복사 파일 안에 들어가는 팀 정보. 팀명이 바뀌면 이 한 줄만 고치세요.
 const TEAM_NAME = 'Team C (류민규, 박수암, 이혜림)';
@@ -123,6 +124,9 @@ export default function DraftResult({ draft }) {
   }, [menuOpen]);
 
   const sources = draft.sources ?? [];
+  const visuals = draft.visuals ?? [];
+  // 시각화 카드의 출처 링크도 출처 목록과 같은 규칙(http/https만 링크)을 따르게 함
+  const safeSources = sources.map((source) => ({ ...source, url: safeUrl(source.url) }));
   const charCount =
     (draft.introduction?.length ?? 0) +
     (draft.body?.length ?? 0) +
@@ -229,6 +233,9 @@ export default function DraftResult({ draft }) {
         <h3>결론</h3>
         <p>{draft.conclusion}</p>
       </article>
+
+      {/* 근거 자료 원문에서 뽑은 차트·표. visuals가 비어 있으면 섹션 자체가 숨겨짐 */}
+      <VisualsSection visuals={visuals} sources={safeSources} />
 
       {sources.length > 0 && (
         <aside className="draft-sources">
