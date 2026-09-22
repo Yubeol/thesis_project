@@ -67,7 +67,7 @@ def run_retrieval_pipeline(
 
 def _build_sources(
     retrieval: dict[str, Any],
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     """
     최종 RAG 검색 결과에서
     Frontend에 노출할 근거 목록을 생성한다.
@@ -117,11 +117,20 @@ def _build_sources(
 
         seen.add(key)
 
+        similarity = paper.get("similarity")
+
+        score = (
+            round(float(similarity), 4)
+            if isinstance(similarity, (int, float))
+            else None
+        )
+
         sources.append(
             {
                 "type": "paper",
                 "title": title,
                 "url": url,
+                "score": score,
             }
         )
 
@@ -151,11 +160,20 @@ def _build_sources(
 
         seen.add(key)
 
+        similarity = news.get("similarity")
+
+        score = (
+            round(float(similarity), 4)
+            if isinstance(similarity, (int, float))
+            else None
+        )
+
         sources.append(
             {
                 "type": "news",
                 "title": title,
                 "url": url,
+                "score": score,
             }
         )
 

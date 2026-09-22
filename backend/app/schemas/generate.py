@@ -59,7 +59,7 @@ class SourceResponse(BaseModel):
     ]
     title: str
     url: str
-
+    score: float | None = None
 
 class GenerateResponse(BaseModel):
     status: Literal[
