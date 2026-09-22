@@ -10,6 +10,7 @@ from agent.adaptive_rag import (
     run_adaptive_retrieval,
 )
 from agent.finalizer import finalize_draft
+from agent.finalizer.case_validator import detect_case_contradictions
 from agent.visualizer import extract_visuals
 from agent.finalizer.output_limiter import (
     enforce_korean_char_limit,
@@ -497,6 +498,49 @@ def _build_sources(
 
     return sources
 
+
+def _align_citations_to_sources(
+    final_text: str,
+    retrieval: dict[str, Any],
+    sources: list[dict[str, str]],
+) -> str:
+    """Match in-text evidence labels to the displayed reference numbers."""
+    source_numbers = {
+        (source["type"], source["url"]): index
+        for index, source in enumerate(sources, start=1)
+    }
+    labels: dict[tuple[str, int], int] = {}
+
+    paper_items = [
+        item for item in retrieval.get("papers", [])
+        if str(item.get("content") or "").strip()
+    ]
+    for index, item in enumerate(paper_items, start=1):
+        url = str(item.get("source_url") or "").strip()
+        if not url:
+            doi = str(item.get("doi") or "").removeprefix("doi:").strip()
+            if doi:
+                url = doi if doi.startswith(("http://", "https://")) else f"https://doi.org/{doi}"
+        number = source_numbers.get(("paper", url))
+        if number:
+            labels[("PAPER", index)] = number
+
+    news_items = [
+        item for item in retrieval.get("news", [])
+        if str(item.get("content") or "").strip()
+    ]
+    for index, item in enumerate(news_items, start=1):
+        number = source_numbers.get(("news", str(item.get("url") or "").strip()))
+        if number:
+            labels[("NEWS", index)] = number
+
+    def replace(match: re.Match[str]) -> str:
+        key = (match.group(1).upper(), int(match.group(2)))
+        number = labels.get(key)
+        return f"[{number}]" if number else match.group(0)
+
+    return re.sub(r"\[\s*(PAPER|NEWS)\s+(\d+)\s*\]", replace, final_text, flags=re.I)
+
 def generate_paper(
     *,
     title: str = "",
@@ -703,10 +747,45 @@ def generate_paper(
         )
     )
 
+    contradictions = detect_case_contradictions(
+        title=analysis.title,
+        draft=final,
+        paper_evidence=final_paper_evidence,
+    )
+    if contradictions:
+        final = finalize_draft(
+            title=analysis.title,
+            topic=analysis.topic,
+            research_question=analysis.research_question,
+            draft=draft,
+            gap_analysis=gap_analysis,
+            paper_evidence=final_paper_evidence,
+            news_evidence=final_news_evidence,
+            correction_notes=contradictions,
+        )
+        final = _limit_korean_final_draft(
+            title=analysis.title,
+            topic=analysis.topic,
+            research_question=analysis.research_question,
+            final_text=final,
+        )
+        remaining = detect_case_contradictions(
+            title=analysis.title,
+            draft=final,
+            paper_evidence=final_paper_evidence,
+        )
+        if remaining:
+            raise RuntimeError(
+                "Finalizer repeatedly reversed a cited paper's case outcome: "
+                + "; ".join(remaining)
+            )
+
     sources = _build_sources(
         final_retrieval,
         cited_text=final,
     )
+
+    final = _align_citations_to_sources(final, final_retrieval, sources)
 
     visuals = extract_visuals(
         title=
