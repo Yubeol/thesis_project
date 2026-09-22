@@ -8,6 +8,7 @@ import LoadingState from './components/LoadingState';
 import EmptyState from './components/EmptyState';
 import DraftResult from './components/DraftResult';
 import ErrorState from './components/ErrorState';
+import ScrollTopButton from './components/ScrollTopButton';
 import { generateDraft } from './api/generate';
 import './App.css';
 
@@ -185,6 +186,8 @@ export default function App() {
           </div>
         </div>
       </div>
+
+      <ScrollTopButton />
     </div>
   );
 }

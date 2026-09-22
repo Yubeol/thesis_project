@@ -1,0 +1,95 @@
+/* src/components/ScrollTopButton.css */
+
+.scroll-top {
+  position: fixed;
+  right: 28px;
+  bottom: 28px;
+  z-index: 25; /* 모바일 사이드바 오버레이(30)보다 아래 */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 52px;
+  height: 52px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: #ffffff;
+  color: var(--color-accent);
+  box-shadow: 0 10px 26px rgba(60, 50, 120, 0.18);
+  cursor: pointer;
+  transition:
+    opacity 0.25s ease,
+    transform 0.2s ease,
+    background 0.2s ease,
+    color 0.2s ease;
+}
+
+/* 이미 맨 위에 있을 때는 살짝 흐리게 */
+.scroll-top.is-at-top {
+  opacity: 0.55;
+}
+
+.scroll-top:hover {
+  opacity: 1;
+  background: var(--gradient-brand);
+  color: #ffffff;
+  transform: translateY(-2px);
+}
+
+.scroll-top:focus-visible {
+  outline: none;
+  opacity: 1;
+  box-shadow:
+    0 0 0 3px var(--color-accent-ring),
+    0 10px 26px rgba(60, 50, 120, 0.18);
+}
+
+.scroll-top-ring {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.scroll-top-track {
+  fill: none;
+  stroke: var(--color-accent-soft);
+  stroke-width: 3;
+}
+
+.scroll-top-progress {
+  fill: none;
+  stroke: var(--color-accent);
+  stroke-width: 3;
+  stroke-linecap: round;
+  transition: stroke-dashoffset 0.1s linear;
+}
+
+/* 호버 시 배경이 그라데이션이 되므로 링을 흰색 계열로 */
+.scroll-top:hover .scroll-top-track {
+  stroke: rgba(255, 255, 255, 0.3);
+}
+
+.scroll-top:hover .scroll-top-progress {
+  stroke: #ffffff;
+}
+
+.scroll-top-arrow {
+  position: relative;
+}
+
+@media (max-width: 900px) {
+  .scroll-top {
+    right: 16px;
+    bottom: 16px;
+    width: 46px;
+    height: 46px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scroll-top,
+  .scroll-top-progress {
+    transition: none;
+  }
+}
