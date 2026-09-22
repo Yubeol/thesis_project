@@ -16,7 +16,7 @@
 import { MOCK_VISUALS } from './mockVisuals';
 
 // 디자인 작업 중에는 목업 사용. 실서버 테스트 시 false로 변경.
-const USE_MOCK = true;
+const USE_MOCK = false;
 
 // 목업일 때 재현할 상황: 'completed' | 'abstained' | 'error'
 const MOCK_SCENARIO = 'completed'; // 'completed' | 'abstained' | 'error'
