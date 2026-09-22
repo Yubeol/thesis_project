@@ -427,7 +427,7 @@ export default function VisualsSection({ visuals, sources = [] }) {
     <section className="visuals-section" aria-label="근거 자료 시각화">
       <div className="visuals-header">
         <h3>근거 자료 시각화</h3>
-        <p>검색된 근거 자료 원문에 실제로 있는 수치만 사용해 만들었습니다.</p>
+        <p>검색된 근거 자료 원문에 있는 수치와 내용만 사용해 만들었습니다.</p>
       </div>
       <div className="visuals-grid">
         {items.map((visual, i) => (
