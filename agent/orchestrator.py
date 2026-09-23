@@ -85,6 +85,16 @@ def _has_news_citation(text: str) -> bool:
     )
 
 
+def _strip_terminal_end_marker(text: str) -> str:
+    """Remove an LLM control marker only when it leaks at the output end."""
+    return re.sub(
+        r"(?:\s*/end\s*)+$",
+        "",
+        text or "",
+        flags=re.I,
+    ).rstrip()
+
+
 def _split_korean_final_draft(
     text: str,
 ) -> dict[str, str]:
@@ -861,6 +871,8 @@ def generate_paper(
                 "Finalizer repeatedly reversed a cited paper's case outcome: "
                 + "; ".join(remaining)
             )
+
+    final = _strip_terminal_end_marker(final)
 
     sources = _build_sources(
         final_retrieval,
