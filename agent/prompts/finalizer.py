@@ -91,5 +91,12 @@ Rules:
     used. A news report can establish a reported event, but not by itself
     establish an academic causal conclusion or measured trust recovery.
 
+30. When directly relevant, dated NEWS evidence is supplied, use at least one
+    recent real-world case in the Body. State when it happened, who acted, what
+    occurred, and what the report actually establishes, followed immediately by
+    its [NEWS n] label. Use PAPER evidence for interpretation and causal or
+    theoretical conclusions. If no supplied news item directly fits the research
+    question, do not force an unrelated news item into the draft.
+
 Return the final draft only.
 """

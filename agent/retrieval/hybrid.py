@@ -84,31 +84,43 @@ def _deduplicate_items(
 def _rank_paper_passages(
     papers: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Keep the strongest passage from each paper ahead of repeated chunks.
-
-    This improves source diversity without treating a keyword match as proof
-    that a passage describes a real case. Case relevance is decided against
-    the research question by the finalizer, not by this ordering heuristic.
-    """
+    """Balance source diversity without hiding highly relevant later chunks."""
     ranked = sorted(
         papers,
         key=lambda item: float(item.get("similarity") or 0.0),
         reverse=True,
     )
-    first_by_paper: list[dict[str, Any]] = []
-    remaining: list[dict[str, Any]] = []
-    seen_papers: set[str] = set()
+    seen_counts: dict[str, int] = {}
+    scored: list[tuple[float, int, dict[str, Any]]] = []
 
-    for item in ranked:
+    for index, item in enumerate(ranked):
         paper_id = item.get("paper_id")
         key = str(paper_id) if paper_id is not None else str(item.get("chunk_id"))
-        if key in seen_papers:
-            remaining.append(item)
-        else:
-            seen_papers.add(key)
-            first_by_paper.append(item)
+        repeated = seen_counts.get(key, 0)
+        seen_counts[key] = repeated + 1
+        score = float(item.get("similarity") or 0.0) - 0.015 * min(repeated, 4)
+        scored.append((score, index, item))
 
-    return first_by_paper + remaining
+    scored.sort(key=lambda entry: (-entry[0], entry[1]))
+    return [item for _, _, item in scored]
+
+
+def _rank_news_results(
+    news: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Keep semantic relevance primary while preserving the recency bonus."""
+    return sorted(
+        news,
+        key=lambda item: (
+            float(
+                item.get("ranking_score")
+                or item.get("similarity")
+                or 0.0
+            ),
+            float(item.get("similarity") or 0.0),
+        ),
+        reverse=True,
+    )
 
 
 def retrieve_hybrid(
@@ -274,10 +286,7 @@ def retrieve_hybrid(
             "article_id",
         ),
     )
-    news_results.sort(
-        key=lambda item: float(item.get("similarity") or 0.0),
-        reverse=True,
-    )
+    news_results = _rank_news_results(news_results)
 
     return {
         "papers": papers,

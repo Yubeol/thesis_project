@@ -30,6 +30,13 @@ VISUAL_EXTRACTION_INSTRUCTION = """
 연구 주제와 직접 관련된 비교 가능한 수치가 존재하면
 정성적 table보다 line / bar / pie를 우선한다.
 
+동일한 지표의 항목별 수치가 2개 이상이면 bar를 반드시 포함하고,
+동일한 지표의 시점별 수치가 2개 이상이면 line을 반드시 포함한다.
+단위나 측정 대상이 서로 다른 숫자를 하나의 chart로 묶지 않는다.
+
+검증 가능한 chart를 만들 수 없지만 source에 서로 비교하거나
+요약할 수 있는 근거 문장이 2개 이상이면 table을 최소 1개 반환한다.
+
 하나의 후보가 부족하더라도
 다른 source에 유효한 데이터가 있다면
 전체 visuals를 빈 배열로 반환하지 않는다.
@@ -870,6 +877,61 @@ def _validate_visuals(
 
     return validated
 
+
+def _grounded_fallback_table(
+    *,
+    visual_sources: list[dict[str, Any]],
+    focus: str,
+) -> list[dict[str, Any]]:
+    """Build one table from verbatim source sentences when charts are impossible.
+
+    This fallback never invents values or summaries. It only selects complete
+    sentences that already exist in one retrieved source, so a qualitative
+    paper can still show a useful visual without manufacturing numeric data.
+    """
+    focus_terms = {
+        token.casefold()
+        for token in re.findall(r"[A-Za-z0-9가-힣-]{2,}", focus or "")
+    }
+
+    for source in visual_sources:
+        source_text = " ".join(str(chunk).strip() for chunk in source["chunks"])
+        sentences = []
+        seen: set[str] = set()
+        for sentence in re.split(r"(?<=[.!?。])\s+", source_text):
+            cleaned = " ".join(sentence.split()).strip()
+            key = cleaned.casefold()
+            if not 35 <= len(cleaned) <= 280 or key in seen:
+                continue
+            seen.add(key)
+            hits = sum(term in key for term in focus_terms)
+            sentences.append((hits, len(sentences), cleaned))
+
+        if len(sentences) < 2:
+            continue
+
+        ranked = sorted(sentences, key=lambda item: (-item[0], item[1]))[:3]
+        rows = [
+            [label, sentence]
+            for label, (_, _, sentence) in zip(
+                ("핵심 근거", "비교 근거", "추가 근거"),
+                ranked,
+            )
+        ]
+        candidate = {
+            "kind": "table",
+            "title": "연구 주제 관련 근거 비교",
+            "columns": ["구분", "원문 근거"],
+            "rows": rows,
+            "source_index": source["source_index"],
+        }
+        return _validate_visuals(
+            raw_visuals=[candidate],
+            visual_sources=visual_sources,
+        )
+
+    return []
+
 def _request_visuals(
     *,
     client: OpenAI,
@@ -954,13 +1016,12 @@ def extract_visuals(
     검색된 실제 청크 원문을 별도 LLM에 전달해
     시각화용 JSON 데이터를 추출한다.
 
-    1차 추출 결과가 검증 후 모두 제거되면
-    동일한 visual source를 사용하여
-    Visualization 추출만 1회 재시도한다.
-
-    실패하더라도 논문 생성에는 영향을 주지 않고
-    빈 배열을 반환한다.
+    수치 chart를 우선하며, 1차 결과에 chart가 없으면 동일 source로
+    Visualization 추출만 1회 재시도한다. 그래도 chart/table을 만들지
+    못하면 실제 원문 문장을 그대로 사용한 비교표를 생성한다.
     """
+
+    visual_sources: list[dict[str, Any]] = []
 
     try:
         visual_sources = (
@@ -1015,7 +1076,7 @@ def extract_visuals(
             visual_sources=visual_sources,
         )
 
-        if validated:
+        if any(visual["kind"] in {"line", "bar", "pie"} for visual in validated):
             return validated
 
         # -------------------------
@@ -1041,7 +1102,17 @@ def extract_visuals(
             )
         )
 
-        return retry_validated
+        combined = retry_validated or validated
+        if combined:
+            return combined
+
+        return _grounded_fallback_table(
+            visual_sources=visual_sources,
+            focus=f"{title} {topic} {research_question}",
+        )
 
     except Exception:
-        return []
+        return _grounded_fallback_table(
+            visual_sources=visual_sources,
+            focus=f"{title} {topic} {research_question}",
+        )

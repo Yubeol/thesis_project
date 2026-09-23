@@ -2,14 +2,11 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { CopyIcon, DownloadIcon, CheckIcon } from './Icons';
 import VisualsSection from './VisualsSection';
-import { downloadPdf, downloadDocx } from '../api/download';
+import { downloadPdf } from '../api/download';
 import './DraftResult.css';
 
 // 다운로드/복사 파일 안에 들어가는 팀 정보. 팀명이 바뀌면 이 한 줄만 고치세요.
 const TEAM_NAME = 'Team C (류민규, 박수암, 이혜림)';
-
-// 논문 첫 장 제목 위, 2쪽부터 머리글 오른쪽에 들어가는 분야 표시
-const FIELD_LABEL = '연예 · 문화 분야 연구 초안';
 
 const SOURCE_TYPE_LABEL = {
   paper: '논문',
@@ -33,11 +30,6 @@ const RUNNING_HEAD_SPACE = 44;
 // http/https 주소만 링크로 허용합니다. (목업의 '#'은 텍스트로만 표시됨)
 function safeUrl(url) {
   return typeof url === 'string' && /^https?:\/\//i.test(url) ? url : null;
-}
-
-// 파일 이름에 쓸 수 없는 문자를 빼고 60자로 자름. 비면 기본 이름 사용
-function makeFileName(title) {
-  return (title ?? '').replace(/[\\/:*?"<>|]/g, '').trim().slice(0, 60) || '논문초안';
 }
 
 // LLM이 \n으로 나눈 문단을 논문 문단(<p>) 단위로 쪼갬
@@ -157,7 +149,7 @@ function buildPlainText(draft) {
   return lines.join('\n');
 }
 
-// 브라우저에서 바로 저장하는 텍스트 형식
+// 브라우저에서 바로 저장하는 텍스트 형식. PDF는 백엔드에서 생성합니다.
 const DOWNLOAD_FORMATS = [
   {
     id: 'txt',
@@ -177,43 +169,11 @@ const DOWNLOAD_FORMATS = [
   },
 ];
 
-// 백엔드가 만들어 주는 파일 형식 (도표는 아직 포함되지 않음)
-const SERVER_FORMATS = [
-  {
-    id: 'pdf',
-    name: 'PDF',
-    label: 'PDF (.pdf)',
-    hint: '서론·본론·결론과 근거 자료',
-    ext: 'pdf',
-    request: downloadPdf,
-  },
-  {
-    id: 'docx',
-    name: 'Word',
-    label: 'Word (.docx)',
-    hint: '한글·Word에서 이어서 편집',
-    ext: 'docx',
-    request: downloadDocx,
-  },
-];
-
-// Blob을 파일로 저장. revoke를 약간 늦춰야 일부 브라우저에서 다운로드가 끊기지 않음
-function saveBlob(blob, fileName) {
-  const href = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.href = href;
-  link.download = fileName;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  window.setTimeout(() => URL.revokeObjectURL(href), 1000);
-}
-
 export default function DraftResult({ draft }) {
   const [copyState, setCopyState] = useState('idle'); // idle | done | fail
   const [menuOpen, setMenuOpen] = useState(false);
-  const [serverBusy, setServerBusy] = useState(null); // null | 'pdf' | 'docx'
-  const [serverError, setServerError] = useState(null); // null | 'pdf' | 'docx'
+  const [pdfDownloading, setPdfDownloading] = useState(false);
+  const [pdfError, setPdfError] = useState(false);
   const [layout, setLayout] = useState(null); // { blocks, pages }
   const [pageWidth, setPageWidth] = useState(0);
   const [fontsVersion, setFontsVersion] = useState(0);
@@ -222,11 +182,6 @@ export default function DraftResult({ draft }) {
   const measureRef = useRef(null);
 
   useEffect(() => () => clearTimeout(resetTimer.current), []);
-
-  // 다른 초안으로 바뀌면 이전 초안의 다운로드 오류 표시를 지움
-  useEffect(() => {
-    setServerError(null);
-  }, [draft]);
 
   // 메뉴 바깥을 누르거나 Esc를 누르면 닫기
   useEffect(() => {
@@ -309,8 +264,6 @@ export default function DraftResult({ draft }) {
   // 초안이 바뀐 직후 한 번은 이전 페이지 정보가 남아 있으므로, 같은 blocks일 때만 사용
   const pages = layout && layout.blocks === blocks ? layout.pages : null;
 
-  const errorFormat = SERVER_FORMATS.find((format) => format.id === serverError);
-
   function flashCopyState(next) {
     setCopyState(next);
     clearTimeout(resetTimer.current);
@@ -328,23 +281,42 @@ export default function DraftResult({ draft }) {
 
   function handleDownload(format) {
     const blob = new Blob([format.build(draft)], { type: format.mime });
-    saveBlob(blob, `${makeFileName(draft.title)}.${format.ext}`);
+    const href = URL.createObjectURL(blob);
+    const safeName =
+      draft.title.replace(/[\\/:*?"<>|]/g, '').trim().slice(0, 60) || '논문초안';
+
+    const link = document.createElement('a');
+    link.href = href;
+    link.download = `${safeName}.${format.ext}`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(href);
+
     setMenuOpen(false);
   }
 
-  // PDF·Word처럼 백엔드가 파일을 만들어 주는 형식
-  async function handleServerDownload(format) {
+  async function handlePdfDownload() {
     setMenuOpen(false);
-    setServerBusy(format.id);
-    setServerError(null);
+    setPdfDownloading(true);
+    setPdfError(false);
 
     try {
-      const blob = await format.request(draft);
-      saveBlob(blob, `${makeFileName(draft.title)}_teamC.${format.ext}`);
+      const blob = await downloadPdf(draft);
+      const href = URL.createObjectURL(blob);
+      const safeName =
+        draft.title.replace(/[\\/:*?"<>|]/g, '').trim().slice(0, 60) || '논문초안';
+      const link = document.createElement('a');
+      link.href = href;
+      link.download = `${safeName}_teamC.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(href), 1000);
     } catch {
-      setServerError(format.id);
+      setPdfError(true);
     } finally {
-      setServerBusy(null);
+      setPdfDownloading(false);
     }
   }
 
@@ -353,7 +325,7 @@ export default function DraftResult({ draft }) {
       case 'front':
         return (
           <div className="paper-front">
-            <p className="paper-kicker">{FIELD_LABEL}</p>
+            <p className="paper-kicker">소셜미디어 기반 글로벌 팬덤 활동이 K-POP의 세계적 확산에 미치는 영향</p>
             <h1 className="paper-title">{draft.title}</h1>
             <p className="paper-authors">{TEAM_NAME}</p>
             {dateText && <p className="paper-date">{dateText}</p>}
@@ -408,11 +380,7 @@ export default function DraftResult({ draft }) {
             본문 {charCount.toLocaleString('ko-KR')}자 · 근거 {sources.length}개
             {pages ? ` · 총 ${pages.length}쪽` : ''}
           </span>
-          {errorFormat && (
-            <span className="draft-meta" role="alert">
-              {errorFormat.name} 다운로드에 실패했습니다. 백엔드를 확인해주세요.
-            </span>
-          )}
+          {pdfError && <span className="draft-meta" role="alert">PDF 다운로드에 실패했습니다. 백엔드를 확인해주세요.</span>}
         </div>
 
         <div className="draft-actions">
@@ -430,7 +398,7 @@ export default function DraftResult({ draft }) {
               aria-expanded={menuOpen}
             >
               <DownloadIcon size={15} />
-              {serverBusy ? '파일 만드는 중...' : '다운로드'}
+              다운로드
             </button>
 
             {menuOpen && (
@@ -448,22 +416,26 @@ export default function DraftResult({ draft }) {
                     </button>
                   </li>
                 ))}
-                {SERVER_FORMATS.map((format) => (
-                  <li key={format.id} role="none">
-                    <button
-                      type="button"
-                      role="menuitem"
-                      className="download-item"
-                      disabled={serverBusy !== null}
-                      onClick={() => handleServerDownload(format)}
-                    >
-                      <span className="download-item-label">{format.label}</span>
-                      <span className="download-item-hint">
-                        {serverBusy === format.id ? '생성 중...' : format.hint}
-                      </span>
-                    </button>
-                  </li>
-                ))}
+                <li role="none">
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="download-item"
+                    disabled={pdfDownloading}
+                    onClick={handlePdfDownload}
+                  >
+                    <span className="download-item-label">PDF (.pdf)</span>
+                    <span className="download-item-hint">
+                      {pdfDownloading ? '생성 중...' : '미리보기 디자인·도표 포함'}
+                    </span>
+                  </button>
+                </li>
+                <li role="none">
+                  <button type="button" role="menuitem" className="download-item" disabled>
+                    <span className="download-item-label">Word (.docx)</span>
+                    <span className="download-item-hint">준비 중</span>
+                  </button>
+                </li>
               </ul>
             )}
           </div>
@@ -492,7 +464,7 @@ export default function DraftResult({ draft }) {
                 {p > 0 && (
                   <div className="paper-running-head">
                     <span className="paper-running-title">{draft.title}</span>
-                    <span>{FIELD_LABEL}</span>
+                    <span>연예 · 문화 분야 연구 초안</span>
                   </div>
                 )}
 

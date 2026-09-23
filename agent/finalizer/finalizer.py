@@ -4,6 +4,7 @@ import re
 
 from openai import OpenAI
 
+from agent.evidence import select_evidence_excerpt
 from agent.prompts.finalizer import FINALIZER_SYSTEM_PROMPT
 from agent.schemas import GapAnalysis
 from agent.grounding import unsupported_numeric_claims
@@ -14,6 +15,7 @@ def _format_evidence(
     *,
     kind: str,
     max_items: int,
+    focus: str = "",
     max_chars_per_item: int = 1800,
 ) -> str:
     if not evidence:
@@ -24,8 +26,11 @@ def _format_evidence(
     for index, item in enumerate(evidence[:max_items], start=1):
         text = str(item).strip()
 
-        if len(text) > max_chars_per_item:
-            text = text[:max_chars_per_item].rstrip() + "..."
+        text = select_evidence_excerpt(
+            text,
+            max_chars=max_chars_per_item,
+            focus=focus,
+        )
 
         label = f"[{kind} {index}]"
         if not re.match(rf"^\[{kind}\s+{index}\]", text, re.I):
@@ -58,6 +63,9 @@ def finalize_draft(
     gap_analysis: GapAnalysis,
     paper_evidence: list[str],
     news_evidence: list[str],
+    correction_notes: list[str] | None = None,
+    prefer_recent_news_case: bool = False,
+    news_case_retry: bool = False,
 ) -> str:
     """
     Transformer 1차 초안과 검색 근거를 이용해
@@ -106,13 +114,50 @@ def finalize_draft(
         paper_evidence,
         kind="PAPER",
         max_items=15,
+        focus=f"{title} {topic} {research_question}",
     )
 
     news_evidence_text = _format_evidence(
         news_evidence,
         kind="NEWS",
         max_items=8,
+        focus=f"{title} {topic} {research_question}",
     )
+
+    correction_text = ""
+    if correction_notes:
+        correction_text = (
+            "CASE CORRECTIONS REQUIRED:\n"
+            + json.dumps(correction_notes, ensure_ascii=False)
+            + "\nCorrect the reversed case outcomes. "
+            "If the evidence remains ambiguous, remove the claim.\n"
+        )
+
+    news_case_text = ""
+    if prefer_recent_news_case:
+        news_case_text = """
+RECENT NEWS CASE REQUIREMENT:
+Review the supplied NEWS EVIDENCE for a directly relevant, dated real-world
+case. When one exists, include at least one such case in the Body and state:
+1. when it happened,
+2. who acted,
+3. what happened,
+4. what the report directly establishes,
+5. the exact [NEWS n] label.
+
+Use NEWS evidence to establish the reported event, not an academic causal
+conclusion. Use PAPER evidence for theoretical interpretation. If none of the
+supplied news items directly fits the research question, do not force or invent
+a case.
+""".strip()
+
+    if news_case_retry:
+        news_case_text += """
+
+The previous final draft omitted every NEWS citation. Re-evaluate each supplied
+news item once. Include a directly relevant recent case if one exists; otherwise
+leave it out rather than citing unrelated material.
+""".rstrip()
 
     user_prompt = f"""
 OUTPUT LANGUAGE:
@@ -177,6 +222,10 @@ If the retrieved evidence does not directly support a claim:
 
 Do NOT replace an unsupported claim with another unsupported claim.
 
+{correction_text}
+
+{news_case_text}
+
 STRICT GROUNDING RULE:
 The claims listed under RESTRICTED CLAIMS were identified as unsupported
 or weakly supported.
@@ -229,8 +278,13 @@ If OUTPUT LANGUAGE is Korean:
   addresses the research question. State the observed event or participants'
   accounts, the study's finding, and the limit of that finding. Do not turn
   a related but different event into evidence of the requested outcome.
+- For comparisons, verify which group or case has each observed outcome.
+  Never swap the groups' actions, level of support, or reported result.
 - If the supplied papers contain no directly relevant case, say so briefly
   instead of inventing one or filling the space with repeated generalities.
+- When RECENT NEWS CASE REQUIREMENT is present and a directly relevant dated
+  news item exists, include one recent case with its [NEWS n] label. Describe
+  only the event and outcome reported by that source; do not infer causation.
 - 결론: directly answer the research question using only supported claims.
   Summarize the body and do not introduce new evidence.
 

@@ -3,11 +3,104 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import date, datetime
 from typing import Any
 
 
 DEFAULT_MAX_CHARS_PER_ITEM = 5000
+
+_FOCUS_STOPWORDS = {
+    "about", "after", "against", "and", "are", "does", "from", "have",
+    "how", "into", "kpop", "k-pop", "online", "that", "the", "their",
+    "this", "what", "when", "with",
+}
+_CASE_SIGNALS = (
+    "observ", "find", "found", "result", "compar", "differ", "protest",
+    "refund", "collective", "collaborat", "support", "lack", "success",
+    "interview", "case study", "반면", "사례", "관찰", "결과", "항의",
+)
+_COMPARISON_SIGNALS = (
+    "instead", "lack", "success", "however", "on the other hand",
+    "whereas", "more", "less", "stronger", "weaker", "반면", "달리",
+)
+
+
+def select_evidence_excerpt(
+    item: str,
+    *,
+    max_chars: int,
+    focus: str,
+) -> str:
+    """Keep query-relevant original sentences instead of only the passage head.
+
+    Retrieved PDF chunks often place the observed result after background
+    paragraphs. This selection never summarizes or adds facts; it retains the
+    source header and extracts complete sentences from the supplied passage.
+    """
+    text = str(item).strip()
+    if len(text) <= max_chars:
+        return text
+
+    marker = re.search(r"(?im)^Evidence:\s*\n", text)
+    if marker is None:
+        return text[:max_chars].rstrip() + "..."
+
+    header = text[:marker.end()]
+    body = text[marker.end():].strip()
+    budget = max_chars - len(header) - 5
+    if budget < 100:
+        return text[:max_chars].rstrip() + "..."
+
+    sentences = [
+        sentence.strip()
+        for sentence in re.split(r"(?<=[.!?])\s+", body)
+        if sentence.strip()
+    ]
+    if len(sentences) < 2:
+        return header + body[:budget].rstrip() + "..."
+
+    terms = {
+        token.casefold()
+        for token in re.findall(r"[A-Za-z][A-Za-z0-9-]{2,}", focus)
+        if token.casefold() not in _FOCUS_STOPWORDS
+    }
+    selected: set[int] = set()
+    covered: set[str] = set()
+    remaining = budget
+
+    while True:
+        best_index = None
+        best_score = 0
+        for index, sentence in enumerate(sentences):
+            if index in selected or len(sentence) + 3 > remaining:
+                continue
+            lowered = sentence.casefold()
+            hits = {term for term in terms if term in lowered}
+            signal_count = sum(signal in lowered for signal in _CASE_SIGNALS)
+            score = (
+                5 * len(hits - covered)
+                + 2 * len(hits)
+                + min(signal_count, 2)
+                + (4 if hits and any(signal in lowered for signal in _COMPARISON_SIGNALS) else 0)
+            )
+            if score > best_score:
+                best_index = index
+                best_score = score
+
+        if best_index is None or best_score == 0:
+            break
+        selected.add(best_index)
+        covered.update(
+            term for term in terms if term in sentences[best_index].casefold()
+        )
+        remaining -= len(sentences[best_index]) + 3
+
+    if not selected:
+        return header + body[:budget].rstrip() + "..."
+
+    excerpt = " ... ".join(sentences[index] for index in sorted(selected))
+    return header + excerpt
 
 
 def _clean_text(value: Any) -> str:

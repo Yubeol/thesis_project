@@ -163,3 +163,11 @@ class DownloadPdfRequest(BaseModel):
     ] = Field(
         default_factory=list
     )
+
+    visuals: list[
+        VisualResponse
+    ] = Field(
+        default_factory=list
+    )
+
+    generated_at: str | None = None
