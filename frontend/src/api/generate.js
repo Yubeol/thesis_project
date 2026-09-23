@@ -4,9 +4,10 @@
 // {
 //   status: 'completed' | 'abstained',
 //   draft: { title, introduction, body, conclusion } | null,
-//   sources: [{ type: 'paper' | 'news', title, url }],
+//   sources: [{ type: 'paper' | 'news', title, url, score }],
 //   visuals: [{ kind: 'line' | 'bar' | 'pie' | 'table', title, ... , source_index }],
-//   message: string | null
+//   message: string | null,
+//   character_count: number   // 프론트는 이 값을 쓰지 않고 직접 셈
 // }
 //
 // 서버 응답의 sources와 visuals는 draft 밖에 있지만, 화면 컴포넌트는 draft 하나만
@@ -23,8 +24,10 @@ const MOCK_SCENARIO = 'completed'; // 'completed' | 'abstained' | 'error'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
 
-// 근거 재검증 단계 때문에 생성이 오래 걸릴 수 있어 넉넉하게 잡습니다. (ms)
-const REQUEST_TIMEOUT_MS = 120000;
+// 실제 Transformer 모델이 돌면 생성이 길어지므로 넉넉하게 240초로 잡습니다. (ms)
+// 실모델 연결 후 E2E 시간을 다시 재서 최종값을 정할 예정.
+// 로딩 화면의 "최대 N분" 안내도 이 값을 사용합니다.
+export const REQUEST_TIMEOUT_MS = 240000;
 
 function mockDelay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
