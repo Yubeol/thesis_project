@@ -51,3 +51,9 @@ data/training/*.jsonl
 data/training/*.tmp
 artifacts/
 transformer/models/transformer-full/
+
+# Local diagnostic and packaging byproducts
+/_tmp_*.txt
+/backend.zip
+/frontend.zip
+/former_draft as call_transformer,
