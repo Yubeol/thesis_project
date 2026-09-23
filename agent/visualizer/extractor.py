@@ -20,7 +20,19 @@ VALID_KINDS = {
     "table",
 }
 
+# [수정] 맨 앞에 "연구 쟁점과의 관련성" 조건 추가
 VISUAL_EXTRACTION_INSTRUCTION = """
+[최우선 조건: 연구 쟁점과의 관련성]
+모든 visual은 question.title이 묻는 쟁점에 직접 답하는 근거여야 한다.
+source에 비교 가능한 내용이 있더라도, 논문 제목의 쟁점과 직접 관련이 없으면
+그 source로 visual을 만들지 않는다.
+예: 제목이 "지역별 팬덤 분포"라면 지역·국가별 비교가 담긴 근거만 사용하고,
+사회 운동 참여 사례처럼 다른 쟁점의 근거는 사용하지 않는다.
+
+각 visual에는 "relevance" 필드를 추가하여,
+이 visual이 논문 제목의 쟁점과 어떻게 연결되는지 한 문장으로 적는다.
+한 문장으로 연결을 설명할 수 없다면 그 visual은 만들지 않는다.
+
 가능한 경우 서로 다른 source_index를 사용하여
 2~3개의 독립적인 visual 후보를 반환하라.
 
@@ -34,8 +46,8 @@ VISUAL_EXTRACTION_INSTRUCTION = """
 동일한 지표의 시점별 수치가 2개 이상이면 line을 반드시 포함한다.
 단위나 측정 대상이 서로 다른 숫자를 하나의 chart로 묶지 않는다.
 
-검증 가능한 chart를 만들 수 없지만 source에 서로 비교하거나
-요약할 수 있는 근거 문장이 2개 이상이면 table을 최소 1개 반환한다.
+검증 가능한 chart를 만들 수 없지만 source에 연구 쟁점과 관련해
+서로 비교하거나 요약할 수 있는 근거 문장이 2개 이상이면 table을 최소 1개 반환한다.
 
 하나의 후보가 부족하더라도
 다른 source에 유효한 데이터가 있다면
@@ -43,12 +55,16 @@ VISUAL_EXTRACTION_INSTRUCTION = """
 """.strip()
 
 
+# [수정] 재시도에서도 관련성 조건 유지
 VISUAL_RETRY_INSTRUCTION = """
 이전 추출 결과에서 검증을 통과한 visual이 하나도 남지 않았다.
 
 동일한 source chunk를 다시 검토하라.
 검색이나 source를 변경하지 말고,
 현재 제공된 근거 안에서만 다시 추출한다.
+
+개수를 채우기 위해 논문 제목의 쟁점과 관련 없는 source를 사용하지 않는다.
+각 visual에는 제목의 쟁점과의 연결을 한 문장으로 적은 "relevance" 필드를 포함한다.
 
 특히 다음 조건을 다시 확인한다.
 
@@ -878,6 +894,7 @@ def _validate_visuals(
     return validated
 
 
+# [수정] 첫 번째 근거가 아니라 주제 단어가 가장 많이 맞는 근거를 선택
 def _grounded_fallback_table(
     *,
     visual_sources: list[dict[str, Any]],
@@ -888,11 +905,18 @@ def _grounded_fallback_table(
     This fallback never invents values or summaries. It only selects complete
     sentences that already exist in one retrieved source, so a qualitative
     paper can still show a useful visual without manufacturing numeric data.
+
+    모든 source의 문장을 먼저 점수화한 뒤, 연구 주제 단어와 가장 많이
+    겹치는 source를 고른다. 점수가 같으면 앞쪽(source_index가 작은) source를
+    선택하므로 관련 단어가 전혀 겹치지 않을 때는 기존 동작과 같다.
     """
     focus_terms = {
         token.casefold()
         for token in re.findall(r"[A-Za-z0-9가-힣-]{2,}", focus or "")
     }
+
+    best_candidate: dict[str, Any] | None = None
+    best_score = -1
 
     for source in visual_sources:
         source_text = " ".join(str(chunk).strip() for chunk in source["chunks"])
@@ -911,6 +935,12 @@ def _grounded_fallback_table(
             continue
 
         ranked = sorted(sentences, key=lambda item: (-item[0], item[1]))[:3]
+        score = sum(hits for hits, _, _ in ranked)
+
+        if score <= best_score:
+            continue
+
+        best_score = score
         rows = [
             [label, sentence]
             for label, (_, _, sentence) in zip(
@@ -918,19 +948,21 @@ def _grounded_fallback_table(
                 ranked,
             )
         ]
-        candidate = {
+        best_candidate = {
             "kind": "table",
             "title": "연구 주제 관련 근거 비교",
             "columns": ["구분", "원문 근거"],
             "rows": rows,
             "source_index": source["source_index"],
         }
-        return _validate_visuals(
-            raw_visuals=[candidate],
-            visual_sources=visual_sources,
-        )
 
-    return []
+    if best_candidate is None:
+        return []
+
+    return _validate_visuals(
+        raw_visuals=[best_candidate],
+        visual_sources=visual_sources,
+    )
 
 def _request_visuals(
     *,

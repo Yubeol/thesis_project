@@ -1,3 +1,4 @@
+import math
 import re
 from io import BytesIO
 from functools import lru_cache
@@ -13,7 +14,7 @@ from docx.shared import Pt
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from reportlab.graphics.charts.piecharts import Pie
-from reportlab.graphics.shapes import Drawing, Line, PolyLine, Rect, String
+from reportlab.graphics.shapes import Drawing, Group, Line, PolyLine, Rect, String
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT
 from reportlab.lib.pagesizes import A4
@@ -210,19 +211,41 @@ PDF_PALETTE = [
     for value in ("#6D5EFC", "#38BDF8", "#F472B6", "#34D399", "#FBBF24")
 ]
 
+# [수정] 저장소 최상위 (backend/app/api/download.py 기준 세 단계 위)
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+
+# [수정] 순위 차트 판정용
+RANK_UNITS = {"위", "순위", "등"}
+RANK_TITLE_PATTERN = re.compile(r"순위|rank", re.IGNORECASE)
+ROTATE_LABELS_AFTER = 6
+
+
+def _font_dirs() -> list[Path]:
+    """저장소 글꼴 → Windows 글꼴 → 리눅스 나눔 글꼴 순서로 찾는다."""
+    return [
+        PROJECT_ROOT / "assets" / "fonts",
+        Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts",
+        Path("/usr/share/fonts/truetype/nanum"),
+    ]
+
 
 @lru_cache(maxsize=1)
 def _pdf_korean_fonts() -> tuple[str, str]:
-    """Register regular and bold Windows fonts for polished Korean output."""
-    font_dir = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts"
+    """Register regular and bold Korean fonts for polished PDF output.
+
+    맑은고딕을 먼저 찾고, 없으면 나눔고딕을 찾는다. 배포 서버(리눅스)에서는
+    저장소의 assets/fonts에 NanumGothic.ttf / NanumGothicBold.ttf를 두면 된다.
+    """
     candidates = (
         ("malgun.ttf", "malgunbd.ttf"),
         ("NanumGothic.ttf", "NanumGothicBold.ttf"),
     )
     for regular_file, bold_file in candidates:
-        regular_path = font_dir / regular_file
-        bold_path = font_dir / bold_file
-        if regular_path.is_file():
+        for font_dir in _font_dirs():
+            regular_path = font_dir / regular_file
+            bold_path = font_dir / bold_file
+            if not regular_path.is_file():
+                continue
             pdfmetrics.registerFont(TTFont("PaperKorean", str(regular_path)))
             if bold_path.is_file():
                 pdfmetrics.registerFont(TTFont("PaperKoreanBold", str(bold_path)))
@@ -252,13 +275,53 @@ def _pdf_generated_date(value: str | None) -> str:
     return f"{parsed.year}년 {parsed.month}월 {parsed.day}일"
 
 
+def _is_rank_visual(visual) -> bool:
+    """단위가 위/순위이거나 제목에 순위·rank가 있고 값이 모두 1 이상 정수면 순위 차트."""
+    if visual.kind not in {"bar", "line"}:
+        return False
+    unit = str(getattr(visual, "unit", None) or "").strip()
+    title = str(getattr(visual, "title", None) or "")
+    if unit not in RANK_UNITS and not RANK_TITLE_PATTERN.search(title):
+        return False
+    values = [float(value) for item in visual.series for value in item.values]
+    return bool(values) and all(value >= 1 and value.is_integer() for value in values)
+
+
+def _rank_ticks(worst: float) -> tuple[float, list[float]]:
+    """1위부터 시작하는 눈금. 최하위 막대가 사라지지 않게 끝에 한 칸 여유를 둔다."""
+    raw = max(worst, 2) / 4
+    magnitude = 10 ** math.floor(math.log10(raw))
+    step = next(m * magnitude for m in (1, 2, 2.5, 5, 10) if m * magnitude >= raw)
+    step = max(1, math.ceil(step))
+    top = math.ceil(worst / step) * step
+    if top <= worst:
+        top += step
+    ticks = [1.0] + [float(value) for value in range(step, int(top) + 1, step) if value > 1]
+    return float(top), ticks
+
+
+def _x_label(drawing: Drawing, x: float, y: float, text: str, font: str, rotated: bool) -> None:
+    """가로축 라벨. 항목이 많으면 비스듬히 기울여 잘리거나 겹치지 않게 한다."""
+    if rotated:
+        label = Group(String(
+            0, 0, str(text)[:18], fontName=font, fontSize=7.5,
+            fillColor=PDF_MUTED, textAnchor="end",
+        ))
+        label.translate(x, y + 6)
+        label.rotate(35)
+        drawing.add(label)
+        return
+    drawing.add(String(
+        x, y, str(text)[:16], fontName=font,
+        fontSize=8, fillColor=PDF_MUTED, textAnchor="middle",
+    ))
+
+
 def _chart_drawing(visual, regular_font: str, bold_font: str) -> Drawing | None:
     """Render validated frontend chart data as a vector PDF graphic."""
     if visual.kind == "table":
         return None
 
-    width, height = 450, 225
-    drawing = Drawing(width, height)
     labels = list(visual.labels)
     series = list(visual.series)
     if not labels or not series:
@@ -268,6 +331,7 @@ def _chart_drawing(visual, regular_font: str, bold_font: str) -> Drawing | None:
         values = list(series[0].values)
         if not values or sum(values) <= 0:
             return None
+        drawing = Drawing(450, 225)
         pie = Pie()
         pie.x, pie.y, pie.width, pie.height = 118, 18, 190, 190
         pie.data = values
@@ -280,31 +344,51 @@ def _chart_drawing(visual, regular_font: str, bold_font: str) -> Drawing | None:
         drawing.add(pie)
         return drawing
 
-    left, bottom, plot_width, plot_height = 48, 40, 382, 150
-    values = [float(value) for item in series for value in item.values]
-    minimum = min(0.0, min(values))
-    maximum = max(0.0, max(values))
-    if minimum == maximum:
-        maximum = minimum + 1.0
-    span = maximum - minimum
+    rank = _is_rank_visual(visual)
+    rotated = len(labels) > ROTATE_LABELS_AFTER
+    extra = 30 if rotated else 0
 
-    for tick in range(5):
-        value = minimum + span * tick / 4
-        y = bottom + plot_height * tick / 4
+    width, height = 450, 225 + extra
+    drawing = Drawing(width, height)
+    left, bottom, plot_width, plot_height = 48, 40 + extra, 382, 150
+    values = [float(value) for item in series for value in item.values]
+
+    if rank:
+        # 순위: 위쪽이 1위, 막대는 아래 기준선에서 올라가므로 1위가 가장 길다.
+        maximum, ticks = _rank_ticks(max(values))
+        minimum = 1.0
+
+        def y_position(value: float) -> float:
+            return bottom + plot_height * (1 - (value - minimum) / (maximum - minimum))
+
+        base_y = bottom
+    else:
+        minimum = min(0.0, min(values))
+        maximum = max(0.0, max(values))
+        if minimum == maximum:
+            maximum = minimum + 1.0
+        span = maximum - minimum
+        ticks = [minimum + span * tick / 4 for tick in range(5)]
+
+        def y_position(value: float) -> float:
+            return bottom + (value - minimum) / span * plot_height
+
+        base_y = y_position(0)
+
+    for value in ticks:
+        y = y_position(value)
         drawing.add(Line(left, y, left + plot_width, y, strokeColor=PDF_GRID, strokeWidth=0.6))
+        tick_text = f"{int(value)}위" if rank else f"{value:,.1f}".replace(".0", "")
         drawing.add(String(
-            left - 6, y - 3, f"{value:,.1f}".replace(".0", ""),
+            left - 6, y - 3, tick_text,
             fontName=regular_font, fontSize=7.5, fillColor=PDF_MUTED,
             textAnchor="end",
         ))
 
-    def y_position(value: float) -> float:
-        return bottom + (value - minimum) / span * plot_height
-
     group_width = plot_width / max(1, len(labels))
+    label_y = bottom - 18
     if visual.kind == "bar":
         bar_width = min(34, group_width * 0.72 / max(1, len(series)))
-        zero_y = y_position(0)
         for label_index, label in enumerate(labels):
             group_x = left + label_index * group_width + group_width / 2
             for series_index, item in enumerate(series):
@@ -312,22 +396,23 @@ def _chart_drawing(visual, regular_font: str, bold_font: str) -> Drawing | None:
                 x = group_x + (series_index - (len(series) - 1) / 2) * bar_width - bar_width * 0.42
                 value_y = y_position(value)
                 drawing.add(Rect(
-                    x, min(zero_y, value_y), bar_width * 0.84,
-                    max(1, abs(value_y - zero_y)),
+                    x, min(base_y, value_y), bar_width * 0.84,
+                    max(1, abs(value_y - base_y)),
                     fillColor=PDF_PALETTE[series_index % len(PDF_PALETTE)],
                     strokeColor=None,
                     rx=3, ry=3,
                 ))
+                value_text = (
+                    f"{int(value)}위" if rank
+                    else f"{value:,.2f}".rstrip("0").rstrip(".")
+                )
                 drawing.add(String(
-                    x + bar_width * 0.42, max(zero_y, value_y) + 4,
-                    f"{value:,.2f}".rstrip("0").rstrip("."),
+                    x + bar_width * 0.42, max(base_y, value_y) + 4,
+                    value_text,
                     fontName=bold_font, fontSize=7.5, fillColor=PDF_INK,
                     textAnchor="middle",
                 ))
-            drawing.add(String(
-                group_x, 22, str(label)[:16], fontName=regular_font,
-                fontSize=8, fillColor=PDF_MUTED, textAnchor="middle",
-            ))
+            _x_label(drawing, group_x, label_y, label, regular_font, rotated)
     else:
         for series_index, item in enumerate(series):
             points = []
@@ -346,21 +431,21 @@ def _chart_drawing(visual, regular_font: str, bold_font: str) -> Drawing | None:
                 strokeWidth=2,
             ))
         for label_index, label in enumerate(labels):
-            drawing.add(String(
-                left + group_width * (label_index + 0.5), 22, str(label)[:16],
-                fontName=regular_font, fontSize=8, fillColor=PDF_MUTED,
-                textAnchor="middle",
-            ))
+            _x_label(
+                drawing, left + group_width * (label_index + 0.5), label_y,
+                label, regular_font, rotated,
+            )
 
     if len(series) > 1:
         legend_x = left
+        legend_y = bottom + plot_height + 17
         for index, item in enumerate(series):
             drawing.add(Rect(
-                legend_x, 207, 8, 8,
+                legend_x, legend_y, 8, 8,
                 fillColor=PDF_PALETTE[index % len(PDF_PALETTE)], strokeColor=None,
             ))
             drawing.add(String(
-                legend_x + 12, 207, item.name[:18], fontName=regular_font,
+                legend_x + 12, legend_y, item.name[:18], fontName=regular_font,
                 fontSize=7.5, fillColor=PDF_MUTED,
             ))
             legend_x += 90
@@ -368,27 +453,31 @@ def _chart_drawing(visual, regular_font: str, bold_font: str) -> Drawing | None:
 
 
 def _visual_flowables(request: DownloadPdfRequest, styles: dict[str, ParagraphStyle]):
-    flowables = [
+    # [수정] 섹션 제목·설명을 따로 두지 않고 첫 번째 도표와 한 묶음으로 만든다.
+    # 그래야 쪽 끝에 제목만 남고 도표가 다음 쪽으로 넘어가는 일이 없다.
+    header = [
         Spacer(1, 8),
         Paragraph("근거 자료 시각화", styles["visual_heading"]),
         Paragraph(
-            "검색된 근거 원문에 존재하는 수치와 비교 항목으로 구성했습니다.",
+            "검색된 근거 자료 원문에 있는 수치와 내용만 사용해 만들었습니다.",
             styles["visual_subtitle"],
         ),
     ]
+    flowables = []
     regular_font, bold_font = _pdf_korean_fonts()
 
-    for visual in request.visuals:
+    for visual_index, visual in enumerate(request.visuals):
         source = (
             request.sources[visual.source_index]
             if 0 <= visual.source_index < len(request.sources)
             else None
         )
-        unit_text = (
-            f' <font size="7" color="#8A86A3">(단위: {escape(visual.unit)})</font>'
-            if visual.kind != "table" and visual.unit
-            else ""
-        )
+        if visual.kind != "table" and _is_rank_visual(visual):
+            unit_text = ' <font size="7" color="#8A86A3">(순위 · 위쪽이 상위)</font>'
+        elif visual.kind != "table" and visual.unit:
+            unit_text = f' <font size="7" color="#8A86A3">(단위: {escape(visual.unit)})</font>'
+        else:
+            unit_text = ""
         card = [Paragraph(
             escape(visual.title) + unit_text,
             styles["visual_title"],
@@ -429,9 +518,21 @@ def _visual_flowables(request: DownloadPdfRequest, styles: dict[str, ParagraphSt
                 styles["visual_source"],
             ))
         card.append(Spacer(1, 10))
-        flowables.append(KeepTogether(card) if visual.kind != "table" else card[0])
+
         if visual.kind == "table":
-            flowables.extend(card[1:])
+            # 표는 쪽을 넘어가며 나뉠 수 있으므로, 제목(첫 번째면 섹션 제목 포함)만 표 첫 부분과 붙인다.
+            lead = header + [card[0]] if visual_index == 0 else [card[0]]
+            flowables.append(KeepTogether(lead + [card[1]]) if len(visual.rows) <= 12 else KeepTogether(lead))
+            if len(visual.rows) > 12:
+                flowables.extend(card[1:])
+            else:
+                flowables.extend(card[2:])
+        else:
+            lead = header if visual_index == 0 else []
+            flowables.append(KeepTogether(lead + card))
+
+    if not request.visuals:
+        return header
     return flowables
 
 

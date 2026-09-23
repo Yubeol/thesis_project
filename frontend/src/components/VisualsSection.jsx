@@ -7,7 +7,22 @@ const KIND_LABEL = { line: '추이', bar: '비교', pie: '비율', table: '표' 
 // 카드 실제 폭(약 300~600px)에 가깝게 잡아야 축 글자가 과하게 축소되지 않는다.
 const W = 420
 const H = 250
-const PLOT = { left: 46, right: W - 12, top: 18, bottom: H - 36 }
+
+// [수정] 항목이 많으면 가로축 라벨을 기울이고, 그만큼 아래 여백과 높이를 늘린다.
+const ROTATE_AFTER = 6
+const ROTATED_EXTRA = 34
+
+function chartFrame(rotated) {
+  const height = H + (rotated ? ROTATED_EXTRA : 0)
+  return {
+    height,
+    plot: { left: 46, right: W - 12, top: 18, bottom: height - (rotated ? 70 : 36) },
+  }
+}
+
+// [수정] 순위 차트 판정: 숫자가 작을수록 좋은 데이터
+const RANK_UNIT = /^(위|순위|등)$/
+const RANK_TITLE = /순위|rank/i
 
 const color = (i) => PALETTE[i % PALETTE.length]
 
@@ -28,9 +43,20 @@ function truncate(text, max) {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text
 }
 
+function valueText(value, unit, rank) {
+  return rank ? `${formatNumber(value)}위` : `${formatNumber(value)}${unit}`
+}
+
 // 표이거나 항목이 많은 그래프는 한 줄 전체를 차지한다.
 function isWide(visual) {
   return visual.kind === 'table' || (visual.labels && visual.labels.length > 8)
+}
+
+// 단위가 '위'/'순위'이거나 제목에 순위·rank가 있고 값이 모두 1 이상 정수면 순위 차트로 본다.
+function detectRank(kind, title, unit, series) {
+  if (kind !== 'bar' && kind !== 'line') return false
+  if (!RANK_UNIT.test(unit.trim()) && !RANK_TITLE.test(title)) return false
+  return series.every((s) => s.values.every((v) => Number.isInteger(v) && v >= 1))
 }
 
 // 백엔드(LLM)가 만든 데이터를 검사해서 그릴 수 있는 형태로 정리한다.
@@ -52,7 +78,7 @@ function normalizeVisual(raw) {
           .map((row) => columns.map((_, i) => (row[i] == null ? '' : String(row[i]))))
       : []
     if (!columns.length || !rows.length) return null
-    return { kind, title, sourceIndex, unit, columns, rows }
+    return { kind, title, sourceIndex, unit, columns, rows, rank: false }
   }
 
   if (!['line', 'bar', 'pie'].includes(kind)) return null
@@ -74,10 +100,11 @@ function normalizeVisual(raw) {
     const values = series[0].values
     const total = values.reduce((a, b) => a + b, 0)
     if (values.some((v) => v < 0) || total <= 0) return null
-    return { kind, title, sourceIndex, unit, labels, series: [series[0]] }
+    return { kind, title, sourceIndex, unit, labels, series: [series[0]], rank: false }
   }
 
-  return { kind, title, sourceIndex, unit, labels, series }
+  const rank = detectRank(kind, title, unit, series)
+  return { kind, title, sourceIndex, unit, labels, series, rank }
 }
 
 // 축 눈금을 1, 2, 2.5, 5 단위의 보기 좋은 값으로 맞춘다.
@@ -91,37 +118,75 @@ function niceScale(minValue, maxValue, ticks = 4) {
   return { min: Math.floor(lo / step) * step, max: Math.ceil(hi / step) * step, step }
 }
 
-const makeY = (scale) => (v) =>
-  PLOT.bottom - ((v - scale.min) / (scale.max - scale.min)) * (PLOT.bottom - PLOT.top)
+// 일반 수치 축: 아래가 작은 값
+function valueAxis(values) {
+  const { min, max, step } = niceScale(Math.min(...values), Math.max(...values))
+  const count = Math.round((max - min) / step)
+  const ticks = Array.from({ length: count + 1 }, (_, i) => Number((min + step * i).toFixed(10)))
+  return { min, max, ticks, inverted: false }
+}
 
-function YGrid({ scale, y }) {
-  const count = Math.round((scale.max - scale.min) / scale.step)
+// 순위 축: 위가 1위. 최하위 막대가 사라지지 않도록 끝에 한 칸 여유를 둔다.
+function rankAxis(values) {
+  const worst = Math.max(...values)
+  const raw = Math.max(worst, 2) / 4
+  const magnitude = 10 ** Math.floor(Math.log10(raw))
+  let step = [1, 2, 2.5, 5, 10].map((m) => m * magnitude).find((s) => s >= raw)
+  step = Math.max(1, Math.ceil(step))
+  let max = Math.ceil(worst / step) * step
+  if (max <= worst) max += step
+  const ticks = [1]
+  for (let v = step; v <= max; v += step) if (v > 1) ticks.push(v)
+  return { min: 1, max, ticks, inverted: true }
+}
+
+function makeY(axis, plot) {
+  const span = axis.max - axis.min
+  const h = plot.bottom - plot.top
+  return axis.inverted
+    ? (v) => plot.top + ((v - axis.min) / span) * h
+    : (v) => plot.bottom - ((v - axis.min) / span) * h
+}
+
+function YGrid({ axis, y, plot, rank }) {
   return (
     <g>
-      {Array.from({ length: count + 1 }, (_, i) => {
-        const v = Number((scale.min + scale.step * i).toFixed(10))
-        return (
-          <g key={i}>
-            <line className="viz-grid" x1={PLOT.left} x2={PLOT.right} y1={y(v)} y2={y(v)} />
-            <text
-              className="viz-axis-text"
-              x={PLOT.left - 8}
-              y={y(v)}
-              textAnchor="end"
-              dominantBaseline="middle"
-            >
-              {formatNumber(v)}
-            </text>
-          </g>
-        )
-      })}
+      {axis.ticks.map((v, i) => (
+        <g key={i}>
+          <line className="viz-grid" x1={plot.left} x2={plot.right} y1={y(v)} y2={y(v)} />
+          <text
+            className="viz-axis-text"
+            x={plot.left - 8}
+            y={y(v)}
+            textAnchor="end"
+            dominantBaseline="middle"
+          >
+            {rank ? `${formatNumber(v)}위` : formatNumber(v)}
+          </text>
+        </g>
+      ))}
     </g>
   )
 }
 
-function XLabel({ x, label }) {
+function XLabel({ x, label, plot, rotated }) {
+  if (rotated) {
+    const ly = plot.bottom + 14
+    return (
+      <text
+        className="viz-axis-text"
+        x={x}
+        y={ly}
+        textAnchor="end"
+        transform={`rotate(-35 ${x} ${ly})`}
+      >
+        <title>{label}</title>
+        {truncate(label, 12)}
+      </text>
+    )
+  }
   return (
-    <text className="viz-axis-text" x={x} y={PLOT.bottom + 22} textAnchor="middle">
+    <text className="viz-axis-text" x={x} y={plot.bottom + 22} textAnchor="middle">
       <title>{label}</title>
       {truncate(label, 7)}
     </text>
@@ -129,28 +194,31 @@ function XLabel({ x, label }) {
 }
 
 function BarChart({ visual }) {
-  const { labels, series, unit } = visual
+  const { labels, series, unit, rank } = visual
+  const rotated = labels.length > ROTATE_AFTER
+  const { height, plot } = chartFrame(rotated)
   const all = series.flatMap((s) => s.values)
-  const scale = niceScale(Math.min(...all), Math.max(...all))
-  const y = makeY(scale)
-  const zeroY = y(0)
-  const band = (PLOT.right - PLOT.left) / labels.length
+  const axis = rank ? rankAxis(all) : valueAxis(all)
+  const y = makeY(axis, plot)
+  // 순위 차트는 아래 기준선에서 위로 자라므로 1위 막대가 가장 길다.
+  const baseY = rank ? plot.bottom : y(0)
+  const band = (plot.right - plot.left) / labels.length
   const groupWidth = band * 0.68
   const barWidth = groupWidth / series.length
-  const showValues = series.length === 1 && labels.length <= 6
-  const labelStep = labels.length > 8 ? Math.ceil(labels.length / 8) : 1
+  const showValues = series.length === 1 && labels.length <= (rank ? 14 : 6)
+  const labelStep = labels.length > 16 ? Math.ceil(labels.length / 16) : 1
 
   return (
-    <svg className="viz-svg" viewBox={`0 0 ${W} ${H}`} role="img" aria-label={visual.title}>
-      <YGrid scale={scale} y={y} />
+    <svg className="viz-svg" viewBox={`0 0 ${W} ${height}`} role="img" aria-label={visual.title}>
+      <YGrid axis={axis} y={y} plot={plot} rank={rank} />
       {labels.map((label, i) => {
-        const groupX = PLOT.left + band * i + (band - groupWidth) / 2
+        const groupX = plot.left + band * i + (band - groupWidth) / 2
         return (
           <g key={i}>
             {series.map((s, si) => {
               const v = s.values[i]
-              const top = Math.min(y(v), zeroY)
-              const height = Math.max(Math.abs(zeroY - y(v)), 0.5)
+              const top = Math.min(y(v), baseY)
+              const barHeight = Math.max(Math.abs(baseY - y(v)), 0.5)
               return (
                 <rect
                   key={si}
@@ -158,12 +226,12 @@ function BarChart({ visual }) {
                   x={groupX + barWidth * si + 1}
                   y={top}
                   width={Math.max(barWidth - 2, 1)}
-                  height={height}
+                  height={barHeight}
                   rx={Math.min(5, barWidth / 3)}
                   fill={color(si)}
                   style={{ animationDelay: `${i * 70 + si * 40}ms` }}
                 >
-                  <title>{`${label} · ${s.name}: ${formatNumber(v)}${unit}`}</title>
+                  <title>{`${label} · ${s.name}: ${valueText(v, unit, rank)}`}</title>
                 </rect>
               )
             })}
@@ -171,50 +239,54 @@ function BarChart({ visual }) {
               <text
                 className="viz-value-text"
                 x={groupX + groupWidth / 2}
-                y={Math.min(y(series[0].values[i]), zeroY) - 6}
+                y={Math.min(y(series[0].values[i]), baseY) - 6}
                 textAnchor="middle"
                 style={{ animationDelay: `${i * 70 + 400}ms` }}
               >
-                {formatNumber(series[0].values[i])}
+                {valueText(series[0].values[i], '', rank)}
               </text>
             )}
-            {i % labelStep === 0 && <XLabel x={groupX + groupWidth / 2} label={label} />}
+            {i % labelStep === 0 && (
+              <XLabel x={groupX + groupWidth / 2} label={label} plot={plot} rotated={rotated} />
+            )}
           </g>
         )
       })}
-      <line className="viz-baseline" x1={PLOT.left} x2={PLOT.right} y1={zeroY} y2={zeroY} />
+      <line className="viz-baseline" x1={plot.left} x2={plot.right} y1={baseY} y2={baseY} />
     </svg>
   )
 }
 
 function LineChart({ visual }) {
-  const { labels, series, unit } = visual
+  const { labels, series, unit, rank } = visual
   const gradientId = `viz-area-${useId().replace(/[^a-zA-Z0-9-]/g, '')}`
-  const all = series.flatMap((s) => s.values)
-  const scale = niceScale(Math.min(...all), Math.max(...all))
-  const y = makeY(scale)
-  const inner = 14
   const n = labels.length
+  const rotated = n > ROTATE_AFTER
+  const { height, plot } = chartFrame(rotated)
+  const all = series.flatMap((s) => s.values)
+  const axis = rank ? rankAxis(all) : valueAxis(all)
+  const y = makeY(axis, plot)
+  const inner = 14
   const x = (i) =>
     n === 1
-      ? (PLOT.left + PLOT.right) / 2
-      : PLOT.left + inner + ((PLOT.right - PLOT.left - inner * 2) * i) / (n - 1)
-  const labelStep = n > 8 ? Math.ceil(n / 8) : 1
+      ? (plot.left + plot.right) / 2
+      : plot.left + inner + ((plot.right - plot.left - inner * 2) * i) / (n - 1)
+  const labelStep = n > 16 ? Math.ceil(n / 16) : 1
   const pathOf = (values) => values.map((v, i) => `${i ? 'L' : 'M'}${x(i)},${y(v)}`).join(' ')
 
   return (
-    <svg className="viz-svg" viewBox={`0 0 ${W} ${H}`} role="img" aria-label={visual.title}>
+    <svg className="viz-svg" viewBox={`0 0 ${W} ${height}`} role="img" aria-label={visual.title}>
       <defs>
         <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
           <stop offset="0%" stopColor={color(0)} stopOpacity="0.28" />
           <stop offset="100%" stopColor={color(0)} stopOpacity="0" />
         </linearGradient>
       </defs>
-      <YGrid scale={scale} y={y} />
+      <YGrid axis={axis} y={y} plot={plot} rank={rank} />
       {series.length === 1 && n > 1 && (
         <path
           className="viz-area"
-          d={`${pathOf(series[0].values)} L${x(n - 1)},${y(scale.min)} L${x(0)},${y(scale.min)} Z`}
+          d={`${pathOf(series[0].values)} L${x(n - 1)},${plot.bottom} L${x(0)},${plot.bottom} Z`}
           fill={`url(#${gradientId})`}
         />
       )}
@@ -239,12 +311,16 @@ function LineChart({ visual }) {
               stroke={color(si)}
               style={{ animationDelay: `${700 + i * 60}ms` }}
             >
-              <title>{`${labels[i]} · ${s.name}: ${formatNumber(v)}${unit}`}</title>
+              <title>{`${labels[i]} · ${s.name}: ${valueText(v, unit, rank)}`}</title>
             </circle>
           ))}
         </g>
       ))}
-      {labels.map((label, i) => (i % labelStep === 0 ? <XLabel key={i} x={x(i)} label={label} /> : null))}
+      {labels.map((label, i) =>
+        i % labelStep === 0 ? (
+          <XLabel key={i} x={x(i)} label={label} plot={plot} rotated={rotated} />
+        ) : null,
+      )}
     </svg>
   )
 }
@@ -364,8 +440,11 @@ function VisualCard({ visual, sources, index, wide }) {
       <header className="viz-card-head">
         <span className={`viz-kind viz-kind--${visual.kind}`}>{KIND_LABEL[visual.kind]}</span>
         <h4 className="viz-title">{visual.title}</h4>
-        {visual.unit && visual.kind !== 'table' && (
-          <span className="viz-unit">단위: {visual.unit}</span>
+        {visual.rank ? (
+          <span className="viz-unit">순위 · 위쪽이 상위</span>
+        ) : (
+          visual.unit &&
+          visual.kind !== 'table' && <span className="viz-unit">단위: {visual.unit}</span>
         )}
       </header>
 
