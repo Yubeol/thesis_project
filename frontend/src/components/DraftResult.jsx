@@ -426,7 +426,7 @@ export default function DraftResult({ draft }) {
                   >
                     <span className="download-item-label">PDF (.pdf)</span>
                     <span className="download-item-hint">
-                      {pdfDownloading ? '생성 중...' : '서론·본론·결론과 근거 자료'}
+                      {pdfDownloading ? '생성 중...' : '미리보기 디자인·도표 포함'}
                     </span>
                   </button>
                 </li>

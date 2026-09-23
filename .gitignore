@@ -57,3 +57,5 @@ transformer/models/transformer-full/
 /backend.zip
 /frontend.zip
 /former_draft as call_transformer,
+/tmp/
+/output/pdf/

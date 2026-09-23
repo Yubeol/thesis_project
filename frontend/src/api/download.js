@@ -1,7 +1,15 @@
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
 
 export async function downloadPdf(draft) {
-  const { title, introduction, body, conclusion, sources = [] } = draft;
+  const {
+    title,
+    introduction,
+    body,
+    conclusion,
+    sources = [],
+    visuals = [],
+    generatedAt = null,
+  } = draft;
   const response = await fetch(`${API_BASE_URL}/api/download/pdf`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -12,6 +20,8 @@ export async function downloadPdf(draft) {
         title: sourceTitle,
         url,
       })),
+      visuals,
+      generated_at: generatedAt,
     }),
   });
 
