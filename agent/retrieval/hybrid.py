@@ -105,6 +105,24 @@ def _rank_paper_passages(
     return [item for _, _, item in scored]
 
 
+def _rank_news_results(
+    news: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Keep semantic relevance primary while preserving the recency bonus."""
+    return sorted(
+        news,
+        key=lambda item: (
+            float(
+                item.get("ranking_score")
+                or item.get("similarity")
+                or 0.0
+            ),
+            float(item.get("similarity") or 0.0),
+        ),
+        reverse=True,
+    )
+
+
 def retrieve_hybrid(
     *,
     paper_queries: list[str],
@@ -268,10 +286,7 @@ def retrieve_hybrid(
             "article_id",
         ),
     )
-    news_results.sort(
-        key=lambda item: float(item.get("similarity") or 0.0),
-        reverse=True,
-    )
+    news_results = _rank_news_results(news_results)
 
     return {
         "papers": papers,

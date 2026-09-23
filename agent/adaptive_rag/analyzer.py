@@ -67,6 +67,12 @@ PAPER EVIDENCE:
 
 NEWS EVIDENCE:
 {_format_evidence(news_evidence)}
+
+EVIDENCE COVERAGE:
+- paper evidence items: {len(paper_evidence)}
+- news evidence items: {len(news_evidence)}
+- If the topic concerns a current real-world event or platform practice and news
+  evidence is absent, evaluate that absence as a possible evidence gap.
 """.strip()
 
     response = client.chat.completions.create(

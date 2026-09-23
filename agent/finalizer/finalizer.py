@@ -64,6 +64,8 @@ def finalize_draft(
     paper_evidence: list[str],
     news_evidence: list[str],
     correction_notes: list[str] | None = None,
+    prefer_recent_news_case: bool = False,
+    news_case_retry: bool = False,
 ) -> str:
     """
     Transformer 1차 초안과 검색 근거를 이용해
@@ -131,6 +133,32 @@ def finalize_draft(
             "If the evidence remains ambiguous, remove the claim.\n"
         )
 
+    news_case_text = ""
+    if prefer_recent_news_case:
+        news_case_text = """
+RECENT NEWS CASE REQUIREMENT:
+Review the supplied NEWS EVIDENCE for a directly relevant, dated real-world
+case. When one exists, include at least one such case in the Body and state:
+1. when it happened,
+2. who acted,
+3. what happened,
+4. what the report directly establishes,
+5. the exact [NEWS n] label.
+
+Use NEWS evidence to establish the reported event, not an academic causal
+conclusion. Use PAPER evidence for theoretical interpretation. If none of the
+supplied news items directly fits the research question, do not force or invent
+a case.
+""".strip()
+
+    if news_case_retry:
+        news_case_text += """
+
+The previous final draft omitted every NEWS citation. Re-evaluate each supplied
+news item once. Include a directly relevant recent case if one exists; otherwise
+leave it out rather than citing unrelated material.
+""".rstrip()
+
     user_prompt = f"""
 OUTPUT LANGUAGE:
 {output_language}
@@ -196,6 +224,8 @@ Do NOT replace an unsupported claim with another unsupported claim.
 
 {correction_text}
 
+{news_case_text}
+
 STRICT GROUNDING RULE:
 The claims listed under RESTRICTED CLAIMS were identified as unsupported
 or weakly supported.
@@ -252,6 +282,9 @@ If OUTPUT LANGUAGE is Korean:
   Never swap the groups' actions, level of support, or reported result.
 - If the supplied papers contain no directly relevant case, say so briefly
   instead of inventing one or filling the space with repeated generalities.
+- When RECENT NEWS CASE REQUIREMENT is present and a directly relevant dated
+  news item exists, include one recent case with its [NEWS n] label. Describe
+  only the event and outcome reported by that source; do not infer causation.
 - 결론: directly answer the research question using only supported claims.
   Summarize the body and do not introduce new evidence.
 

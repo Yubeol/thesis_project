@@ -1,4 +1,5 @@
 import re
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from agent.query_analyzer import analyze_query
@@ -27,6 +28,60 @@ def _contains_hangul(
     return any(
         "\uac00" <= char <= "\ud7a3"
         for char in (text or "")
+    )
+
+
+def _has_recent_citable_news(
+    retrieval: dict[str, Any],
+    *,
+    years: int = 3,
+) -> bool:
+    """Check for a dated, linkable news item without changing retrieval."""
+    cutoff = datetime.now(timezone.utc) - timedelta(days=366 * years)
+
+    for item in retrieval.get("news", []):
+        if not str(item.get("content") or "").strip():
+            continue
+        if not str(item.get("url") or "").strip():
+            continue
+
+        published_at = item.get("published_at")
+        parsed: datetime | None = None
+
+        if isinstance(published_at, datetime):
+            parsed = published_at
+        elif isinstance(published_at, date):
+            parsed = datetime.combine(
+                published_at,
+                datetime.min.time(),
+                tzinfo=timezone.utc,
+            )
+        elif published_at:
+            try:
+                parsed = datetime.fromisoformat(
+                    str(published_at).replace("Z", "+00:00")
+                )
+            except ValueError:
+                parsed = None
+
+        if parsed is None:
+            continue
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+
+        if parsed.astimezone(timezone.utc) >= cutoff:
+            return True
+
+    return False
+
+
+def _has_news_citation(text: str) -> bool:
+    return bool(
+        re.search(
+            r"\[\s*NEWS\s+\d+\s*\]",
+            text or "",
+            flags=re.I,
+        )
     )
 
 
@@ -708,6 +763,10 @@ def generate_paper(
             )
         )
 
+    recent_news_available = _has_recent_citable_news(
+        final_retrieval
+    )
+
     final = finalize_draft(
         title=
             analysis.title,
@@ -729,6 +788,9 @@ def generate_paper(
 
         news_evidence=
             final_news_evidence,
+
+        prefer_recent_news_case=
+            recent_news_available,
     )
 
     final = (
@@ -747,6 +809,25 @@ def generate_paper(
         )
     )
 
+    if recent_news_available and not _has_news_citation(final):
+        final = finalize_draft(
+            title=analysis.title,
+            topic=analysis.topic,
+            research_question=analysis.research_question,
+            draft=draft,
+            gap_analysis=gap_analysis,
+            paper_evidence=final_paper_evidence,
+            news_evidence=final_news_evidence,
+            prefer_recent_news_case=True,
+            news_case_retry=True,
+        )
+        final = _limit_korean_final_draft(
+            title=analysis.title,
+            topic=analysis.topic,
+            research_question=analysis.research_question,
+            final_text=final,
+        )
+
     contradictions = detect_case_contradictions(
         title=analysis.title,
         draft=final,
@@ -762,6 +843,7 @@ def generate_paper(
             paper_evidence=final_paper_evidence,
             news_evidence=final_news_evidence,
             correction_notes=contradictions,
+            prefer_recent_news_case=recent_news_available,
         )
         final = _limit_korean_final_draft(
             title=analysis.title,

@@ -439,14 +439,36 @@ jobs:
                   """
               ).fetchone()[0]
 
+              freshness = conn.execute(
+                  """
+                  SELECT
+                      MAX(published_at),
+                      COUNT(*) FILTER (
+                          WHERE published_at >= CURRENT_TIMESTAMP - INTERVAL '90 days'
+                      ),
+                      COUNT(*) FILTER (
+                          WHERE published_at >= CURRENT_TIMESTAMP - INTERVAL '3 years'
+                      )
+                  FROM news
+                  """
+              ).fetchone()
+
           print(f"NEWS_COUNT={news_count}")
           print(f"NEWS_CHUNKS={chunk_count}")
           print(f"MISSING_EMBEDDING={missing_embedding}")
           print(f"UNINDEXED_NEWS={unindexed_news}")
+          print(f"LATEST_NEWS_PUBLISHED_AT={freshness[0]}")
+          print(f"NEWS_PUBLISHED_LAST_90_DAYS={freshness[1]}")
+          print(f"NEWS_PUBLISHED_LAST_3_YEARS={freshness[2]}")
 
           if missing_embedding != 0:
               raise SystemExit(
                   "Found news chunks without embeddings."
+              )
+
+          if freshness[1] == 0:
+              print(
+                  "WARNING: No news published in the last 90 days is currently indexed."
               )
           PY
 

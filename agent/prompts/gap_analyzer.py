@@ -18,6 +18,13 @@ Identify claims that are:
 - too broad for the evidence,
 - dependent on recent information that is missing.
 
+Also treat these as evidence gaps when they matter to the research question:
+- the draft contains only general descriptions and no concrete observed case,
+- a current platform, fandom, artist, campaign, dispute, or industry development
+  is discussed but no dated news evidence is supplied,
+- the supplied case does not identify who acted, what happened, and what outcome
+  was actually reported.
+
 If the evidence is sufficient:
 - set needs_additional_retrieval to false
 - return empty paper_queries and news_queries
@@ -34,6 +41,10 @@ Rules:
 - Maximum 3 news queries.
 - Use papers for academic, theoretical, causal, historical, or research claims.
 - Use news for recent events, current trends, platform changes, artist activity, or industry developments.
+- When a current real-world example would materially improve the Body, generate at
+  least one focused news query even if the general academic background is sufficient.
+- Do not request news merely to satisfy a quota when the research question is wholly
+  historical or the supplied news would be unrelated.
 - If the draft explicitly contains "Insufficient evidence to generate this section reliably.",
   treat that section as an evidence gap.
 

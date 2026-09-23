@@ -96,6 +96,17 @@ def run_adaptive_retrieval(
         ],
         item_type="news",
     )
+    merged_news.sort(
+        key=lambda item: (
+            float(
+                item.get("ranking_score")
+                or item.get("similarity")
+                or 0.0
+            ),
+            float(item.get("similarity") or 0.0),
+        ),
+        reverse=True,
+    )
 
     merged = {
         "papers": merged_papers,

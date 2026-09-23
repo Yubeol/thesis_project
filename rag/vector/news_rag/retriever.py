@@ -5,6 +5,7 @@ from rag.vector.retriever import get_connection
 
 
 DEFAULT_TOP_K = 5
+NEWS_CANDIDATE_MULTIPLIER = 4
 
 
 def search_news_vector(
@@ -16,6 +17,10 @@ def search_news_vector(
 
     같은 뉴스에 여러 Chunk가 검색될 경우,
     뉴스별 similarity가 가장 높은 Chunk 1개만 반환한다.
+
+    먼저 의미 유사도가 높은 후보군을 고른 뒤 최근성에 작은 가산점을 준다.
+    따라서 관련성이 낮은 최신 기사가 관련성이 높은 과거 기사를 무조건
+    밀어내지는 않는다.
     """
 
     if not query_en or not query_en.strip():
@@ -26,6 +31,11 @@ def search_news_vector(
 
     query_embedding = Vector(
         embed_query(query_en)
+    )
+
+    candidate_limit = max(
+        top_k,
+        top_k * NEWS_CANDIDATE_MULTIPLIER,
     )
 
     sql = """
@@ -56,6 +66,39 @@ def search_news_vector(
                 ON n.news_id = nc.news_id
 
             WHERE nc.embedding IS NOT NULL
+        ),
+
+        best_news AS (
+            SELECT
+                chunk_id,
+                news_id,
+                chunk_index,
+                content_en,
+                title_original,
+                title_en_for_rag,
+                original_language,
+                published_at,
+                source,
+                url,
+                similarity
+            FROM ranked_chunks
+            WHERE news_rank = 1
+            ORDER BY similarity DESC
+            LIMIT %s
+        ),
+
+        candidates AS (
+            SELECT
+                *,
+                CASE
+                    WHEN published_at IS NULL THEN 0.0
+                    WHEN published_at >= CURRENT_TIMESTAMP - INTERVAL '3 years'
+                        THEN 1.0
+                    WHEN published_at >= CURRENT_TIMESTAMP - INTERVAL '5 years'
+                        THEN 0.5
+                    ELSE 0.0
+                END AS recency_score
+            FROM best_news
         )
 
         SELECT
@@ -71,13 +114,13 @@ def search_news_vector(
             source,
             url,
 
-            similarity
+            similarity,
+            recency_score,
+            similarity + (recency_score * 0.08) AS ranking_score
 
-        FROM ranked_chunks
+        FROM candidates
 
-        WHERE news_rank = 1
-
-        ORDER BY similarity DESC
+        ORDER BY ranking_score DESC, similarity DESC
 
         LIMIT %s;
     """
@@ -89,6 +132,7 @@ def search_news_vector(
                 (
                     query_embedding,
                     query_embedding,
+                    candidate_limit,
                     top_k,
                 ),
             )
@@ -108,6 +152,8 @@ def search_news_vector(
             "source": row[8],
             "url": row[9],
             "similarity": float(row[10]),
+            "recency_score": float(row[11]),
+            "ranking_score": float(row[12]),
         }
         for row in rows
     ]
